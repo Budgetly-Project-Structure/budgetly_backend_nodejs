@@ -1,38 +1,39 @@
-# Financial Planner — Backend
+# Budgetly — Backend (Node.js)
 
-Backend for the CSCI 475 Team 3 Financial Planner app: a budgeting app that imports bank statements, auto-categorizes transactions with AI, and answers natural-language questions about spending.
+Server side for Budgetly: Firebase Cloud Functions that import bank statements, categorize transactions with AI, and serve data to the web and mobile apps.
 
-This repo holds the server side only. The web app and project docs live in the frontend repo.
-
-## Related Repositories
+## Budgetly Repositories
 
 | Repo | Contents |
 |---|---|
-| [Frontend](https://github.com/zsheppard78/csci475---Team-3---Financial-App) | React + Tailwind web app, project docs (`assets/docs`), sprint reports |
-| **Backend** (this repo) | Firebase Cloud Functions (Node.js), Firestore rules, API contract |
+| [budgetly_web_customer](https://github.com/zsheppard78/budgetly_web_customer) | Customer-facing React web app |
+| [budgetly_web_dash](https://github.com/zsheppard78/budgetly_web_dash) | Dashboard web app |
+| **budgetly_backend_nodejs** (this repo) | Firebase Cloud Functions (Node.js), Firestore rules |
+| [budgetly_contracts](https://github.com/zsheppard78/budgetly_contracts) | Interfaces: data schemas, API definitions, AI interface |
+| [budgetly_assets](https://github.com/zsheppard78/budgetly_assets) | Docs, images, reports |
+
+Every function here implements an interface defined in **budgetly_contracts**. Change the contract first, then the code.
 
 ## Tech Stack
 
-- **Firebase Cloud Functions** (Node.js): server logic
-- **Cloud Firestore**: database
-- **Firebase Auth**: user accounts (handled client-side, verified in functions)
+- **Firebase Cloud Functions** (Node.js)
+- **Cloud Firestore**
+- **Firebase Auth** (tokens verified in functions)
 
 ## Structure
 
 ```
-functions/          Cloud Functions source (Node.js)
+functions/          Cloud Functions source
 .gitignore
 README.md
 ```
 
-Planned additions:
-- `api-contract.md`: the single contract file defining every function's inputs, outputs, and error codes, plus Firestore document shapes. The web and mobile apps build against this file.
-- `firestore.rules`, `firestore.indexes.json`, `firebase.json`: Firebase configuration
+Planned: `firebase.json`, `firestore.rules`, `firestore.indexes.json`
 
 ## Planned Functions (Sprint 2)
 
-- **Statement import:** receive an uploaded CSV/PDF bank statement, parse it, and write transactions to Firestore, reporting partial failures and upload status
-- **Transaction categorization:** send merchant, amount, and date to an AI model and return a category label with a confidence score, falling back to "Uncategorized" on failure
+- **Statement import:** receive an uploaded CSV/PDF statement, parse it, write transactions to Firestore, and report partial failures and status
+- **Transaction categorization:** send merchant, amount, and date to an AI model and return a category and confidence score, falling back to "Uncategorized" on failure
 
 ## Local Setup
 
@@ -43,11 +44,6 @@ npm install -g firebase-tools
 firebase login
 cd functions
 npm install
-```
-
-Run locally with the Firebase emulators:
-
-```bash
 firebase emulators:start
 ```
 
@@ -59,7 +55,7 @@ firebase deploy --only functions
 
 ## Secrets
 
-API keys (e.g., the AI model key) are stored with Firebase Functions secrets and are never committed to this repo or placed in frontend code.
+API keys (e.g., the AI model key) are stored with Firebase Functions secrets and are never committed or placed in frontend code.
 
 ## Workflow
 
