@@ -1,0 +1,10 @@
+# Firebase logs
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+node_modules/
+
+# Local AI agent skill files
+.agents/
+.claude/
+skills-lock.json
