@@ -1,0 +1,38 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['email','displayName','createdAt','consentAcceptedAt']);
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['displayName','consentAcceptedAt']);
+      allow delete: if false;
+
+      // Transactions are created only by Cloud Functions (Admin SDK bypasses rules).
+      // Users may only re-categorize.
+      match /transactions/{txnId} {
+        allow read: if isOwner(uid);
+        allow update: if isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['category','categorySource','updatedAt'])
+          && request.resource.data.category is string
+          && request.resource.data.categorySource == 'user';
+        allow create, delete: if false;
+      }
+
+      // Import status is written by the server; the client only reads it.
+      match /imports/{importId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+    }
+    // Anything not matched above is denied by default.
+  }
+}
