@@ -1,0 +1,26 @@
+{
+  "name": "budgetly_backend_nodejs",
+  "version": "1.0.0",
+  "description": "Server side for Budgetly: Firebase Cloud Functions that import bank statements, categorize transactions with AI, and serve data to the web and mobile apps.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zsheppard78/budgetly_backend_nodejs.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/zsheppard78/budgetly_backend_nodejs/issues"
+  },
+  "homepage": "https://github.com/zsheppard78/budgetly_backend_nodejs#readme",
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.19.0",
+    "mocha": "^12.0.2"
+  }
+}
