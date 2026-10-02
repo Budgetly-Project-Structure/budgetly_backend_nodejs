@@ -1,0 +1,269 @@
+/**
+ * Tests for SCRUM-26/27/28: transactions.js, firestoreStore.js, importPipeline.js.
+ * No Firebase or network needed: the pipeline gets a fake store, and the
+ * store gets a tiny in-memory fake of Firestore.
+ *
+ * Run from the functions/ folder:  npm test
+ */
+"use strict";
+
+const { test, describe } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const { toTransactionDocs, transactionId } = require("../lib/transactions");
+const { createStore, BATCH_SIZE } = require("../lib/firestoreStore");
+const { processImport, PDF_NOT_READY, UNEXPECTED } = require("../lib/importPipeline");
+
+const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name));
+const silentLogger = { info() {}, warn() {}, error() {} };
+
+// ---------------------------------------------------------------------------
+describe("toTransactionDocs", () => {
+  const parsed = [
+    { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amount: 1850, rowNumber: 2 },
+    { date: "2026-09-02", merchant: "Starbucks", amount: -6.45, rowNumber: 3 },
+  ];
+  const docs = toTransactionDocs(parsed, { uid: "alice", importId: "imp123", accountId: "acct-checking" });
+
+  test("matches the shape in the data model", () => {
+    assert.deepEqual(docs[1], {
+      id: "imp123_00003",
+      userId: "alice",
+      date: new Date("2026-09-02T12:00:00Z"),
+      merchant: "Starbucks",
+      amount: -6.45,
+      category: "uncategorized",
+      categoryConfidence: null,
+      categorySource: "none",
+      isUserCorrected: false,
+      accountId: "acct-checking",
+      sourceStatementId: "imp123",
+    });
+  });
+
+  test("document IDs are deterministic, so a re-run overwrites instead of duplicating", () => {
+    const again = toTransactionDocs(parsed, { uid: "alice", importId: "imp123" });
+    assert.deepEqual(again.map((d) => d.id), docs.map((d) => d.id));
+    assert.equal(transactionId("imp123", 42), "imp123_00042");
+  });
+
+  test("missing account becomes null, not undefined (Firestore rejects undefined)", () => {
+    const d = toTransactionDocs(parsed, { uid: "alice", importId: "imp123" });
+    assert.equal(d[0].accountId, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+/** Minimal in-memory stand-in for the parts of Firestore the store uses. */
+function fakeFirestore() {
+  const data = new Map(); // "users/alice/transactions/x" -> doc data
+  const commits = [];
+  const ref = (p) => ({
+    path: p,
+    collection: (name) => collection(`${p}/${name}`),
+    update: async (patch) => data.set(p, { ...(data.get(p) ?? {}), ...patch }),
+  });
+  const collection = (p) => ({
+    doc: (id) => ref(`${p}/${id}`),
+    where: (field, op, value) => ({
+      limit: (n) => ({
+        get: async () => {
+          const docs = [...data.entries()]
+            .filter(([k, v]) => k.startsWith(`${p}/`) && v[field] === value)
+            .slice(0, n)
+            .map(([k]) => ({ ref: ref(k) }));
+          return { empty: docs.length === 0, docs };
+        },
+      }),
+    }),
+  });
+  return {
+    data,
+    commits,
+    collection,
+    batch: () => {
+      const ops = [];
+      return {
+        set: (r, d) => ops.push(["set", r.path, d]),
+        delete: (r) => ops.push(["delete", r.path]),
+        commit: async () => {
+          commits.push(ops.length);
+          for (const [type, p, d] of ops) type === "set" ? data.set(p, d) : data.delete(p);
+        },
+      };
+    },
+  };
+}
+
+describe("firestoreStore", () => {
+  const stamp = () => "SERVER_TS";
+  const makeDocs = (n, importId = "imp1") =>
+    toTransactionDocs(
+      Array.from({ length: n }, (_, i) => ({ date: "2026-09-01", merchant: `M${i}`, amount: -1, rowNumber: i + 2 })),
+      { uid: "alice", importId }
+    );
+
+  test("writes under users/{uid}/transactions with createdAt and without the id field", async () => {
+    const db = fakeFirestore();
+    const store = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
+    await store.writeTransactions(makeDocs(2));
+    const saved = db.data.get("users/alice/transactions/imp1_00002");
+    assert.equal(saved.merchant, "M0");
+    assert.equal(saved.createdAt, "SERVER_TS");
+    assert.equal("id" in saved, false);
+  });
+
+  test("splits large imports into batches under Firestore's 500-operation limit", async () => {
+    const db = fakeFirestore();
+    const store = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
+    await store.writeTransactions(makeDocs(1000));
+    assert.equal(db.data.size, 1000);
+    assert.deepEqual(db.commits, [BATCH_SIZE, BATCH_SIZE, 1000 - 2 * BATCH_SIZE]);
+    assert.ok(Math.max(...db.commits) <= 500);
+  });
+
+  test("writing the same import twice does not create duplicates", async () => {
+    const db = fakeFirestore();
+    const store = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
+    await store.writeTransactions(makeDocs(5));
+    await store.writeTransactions(makeDocs(5));
+    assert.equal(db.data.size, 5);
+  });
+
+  test("deleteTransactions removes only this import's transactions", async () => {
+    const db = fakeFirestore();
+    const a = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
+    const b = createStore({ db, uid: "alice", importId: "imp2", serverTimestamp: stamp });
+    await a.writeTransactions(makeDocs(600, "imp1"));
+    await b.writeTransactions(makeDocs(3, "imp2"));
+    await a.deleteTransactions();
+    assert.equal(db.data.size, 3);
+    assert.ok([...db.data.keys()].every((k) => k.includes("imp2_")));
+  });
+
+  test("update() merges into users/{uid}/imports/{importId} and stamps updatedAt", async () => {
+    const db = fakeFirestore();
+    const store = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
+    await store.update({ status: "processing" });
+    assert.deepEqual(db.data.get("users/alice/imports/imp1"), { status: "processing", updatedAt: "SERVER_TS" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+/** Fake store that records what the pipeline does. */
+function fakeStore({ failOn } = {}) {
+  const s = {
+    updates: [],
+    written: [],
+    deleted: 0,
+    async update(patch) {
+      if (failOn === "update:completed" && patch.status === "completed") throw new Error("firestore down");
+      s.updates.push(patch);
+    },
+    async writeTransactions(docs) {
+      if (failOn === "write") throw new Error("write failed");
+      s.written.push(...docs);
+    },
+    async deleteTransactions() {
+      s.deleted++;
+    },
+  };
+  return s;
+}
+const run = (store, over = {}) =>
+  processImport({ fileType: "csv", uid: "alice", importId: "imp1", accountId: "acct-checking", store, logger: silentLogger, ...over });
+const last = (store) => store.updates.at(-1);
+
+describe("processImport: happy path", () => {
+  test("clean CSV: processing -> completed, all transactions saved", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv") });
+    assert.equal(store.updates[0].status, "processing");
+    assert.equal(result.status, "completed");
+    assert.equal(result.transactionCount, 36);
+    assert.equal(store.written.length, 36);
+    assert.deepEqual(last(store), {
+      status: "completed",
+      transactionCount: 36,
+      skippedRowCount: 0,
+      rowErrors: [],
+      error: null,
+    });
+  });
+
+  test("every saved transaction is linked to the import and account", async () => {
+    const store = fakeStore();
+    await run(store, { fileBuffer: fixture("checking_aug_2026.csv") });
+    assert.equal(store.written.length, 21);
+    assert.ok(store.written.every((d) => d.sourceStatementId === "imp1" && d.userId === "alice" && d.accountId === "acct-checking"));
+  });
+});
+
+describe("processImport: partial failures (SCRUM-27)", () => {
+  test("bad rows are skipped, good rows are kept, and the skips are reported", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileBuffer: fixture("messy.csv") });
+    assert.equal(result.status, "completed");
+    assert.equal(result.transactionCount, 4);
+    assert.equal(result.skippedRowCount, 4);
+    assert.equal(last(store).rowErrors.length, 4);
+    assert.deepEqual(last(store).rowErrors[0], { row: 9, reason: 'date "13/45/2026" isn\'t a valid date' });
+  });
+
+  test("a file where every row is bad fails, and the message says why", async () => {
+    const store = fakeStore();
+    const csv = "Date,Description,Amount\nnot-a-date,Coffee,-4.50\nalso-bad,Tea,-3.00\n";
+    const result = await run(store, { fileBuffer: Buffer.from(csv) });
+    assert.equal(result.status, "failed");
+    assert.match(result.error, /couldn't read any transactions/);
+    assert.match(result.error, /Line 2: date "not-a-date" isn't a valid date/);
+    assert.equal(store.written.length, 0);
+  });
+});
+
+describe("processImport: failures (SCRUM-28)", () => {
+  test("unusable file -> failed with the parser's user-facing message", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileBuffer: Buffer.from("") });
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, "This file is empty.");
+    assert.deepEqual(last(store), { status: "failed", error: "This file is empty.", transactionCount: 0 });
+    assert.equal(store.deleted, 0);
+  });
+
+  test("PDF -> failed with a clear next step until SCRUM-25 is done", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileType: "pdf", fileBuffer: Buffer.from("%PDF-1.7") });
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, PDF_NOT_READY);
+    assert.equal(store.written.length, 0);
+  });
+
+  test("unexpected error while saving -> partial writes are cleaned up, generic message shown", async () => {
+    const store = fakeStore({ failOn: "write" });
+    const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv") });
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, UNEXPECTED);
+    assert.equal(store.deleted, 1);
+    assert.equal(last(store).status, "failed");
+    assert.doesNotMatch(result.error, /write failed/); // internals never reach the user
+  });
+
+  test("failing to mark 'completed' also rolls back the transactions", async () => {
+    const store = fakeStore({ failOn: "update:completed" });
+    const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv") });
+    assert.equal(result.status, "failed");
+    assert.equal(store.deleted, 1);
+  });
+
+  test("never throws, even if Firestore is down for the status update too", async () => {
+    const store = fakeStore({ failOn: "write" });
+    store.update = async () => {
+      throw new Error("firestore down");
+    };
+    const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv") });
+    assert.equal(result.status, "failed");
+  });
+});
