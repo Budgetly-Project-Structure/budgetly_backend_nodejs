@@ -1,0 +1,14 @@
+﻿Account: Everyday Checking ****4521
+Statement period: 09/01/2026 - 09/30/2026
+
+Posting Date,Description,Amount,Running Balance
+09/01/2026,"ACME CORP, PAYROLL","$1,850.00","$2,000.00"
+09/02/2026,"Joe's ""Famous"" Pizza",(24.50),"$1,975.50"
+9/3/26,Netflix,15.49-,"$1,960.01"
+
+13/45/2026,Bad Date Cafe,-5.00,"$1,955.01"
+09/05/2026,,-12.00,"$1,943.01"
+09/06/2026,Hy-Vee,abc,"$1,943.01"
+09/07/2026,Shell Oil,,"$1,943.01"
+"Sep 8, 2026","Multi
+line memo",-9.99,"$1,933.02"
