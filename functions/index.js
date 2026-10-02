@@ -38,6 +38,9 @@ exports.onStatementUploaded = onObjectFinalized(async (event) => {
 
   // 1. FILTER: this fires for EVERY file uploaded to the bucket,
   //    so exit unless the path is users/{uid}/imports/{fileName}
+  //    Note: creating a folder in the emulator's Storage UI uploads an empty
+  //    placeholder like "users/abc/imports/" (fileName = ""). It passes this
+  //    check and then gets skipped by the file-type check in step 3.
   if (parts.length !== 4 || parts[0] !== "users" || parts[2] !== "imports") {
     return;
   }

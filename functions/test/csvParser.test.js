@@ -13,6 +13,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { parseStatementCsv, StatementParseError, parseDate, parseMoney } = require("../lib/csvParser");
 
+// How these tests are organized:
+//   - three real-looking statement files in test/fixtures/ (signed Amount column,
+//     Debit/Credit columns, and a deliberately messy file)
+//   - small inline CSVs for other layouts and edge cases
+//   - whole-file failures, size limits, then parseDate / parseMoney one value at a time
+// Each describe() is a group; each test() is one check (63 in total).
+
+// fixture("x.csv") reads a test file as a Buffer, like the Cloud Function will get it from Storage.
+// sum() adds up amounts and rounds to cents, to compare with the known statement total.
 const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name));
 const sum = (txns) => Math.round(txns.reduce((s, t) => s + t.amount, 0) * 100) / 100;
 
@@ -68,6 +77,9 @@ describe("fixture: Debit / Credit columns (checking_aug_2026.csv)", () => {
   });
 });
 
+// messy.csv has: a byte-order mark, account info above the header, quoted commas
+// and quotes, (24.50) and 15.49- amounts, a 2-digit year, a blank line, 4 bad rows,
+// and a description split across two lines. 4 rows should parse and 4 should be reported.
 describe("fixture: messy file (messy.csv)", () => {
   const result = parseStatementCsv(fixture("messy.csv"));
 
@@ -108,6 +120,7 @@ describe("fixture: messy file (messy.csv)", () => {
   });
 });
 
+// Other bank export styles: different delimiters, encodings and ways of showing +/-
 describe("other layouts", () => {
   test("semicolon-delimited", () => {
     const r = parseStatementCsv("Date;Description;Amount\n2026-09-01;Coffee;-4.50\n");
@@ -168,6 +181,8 @@ describe("other layouts", () => {
   });
 });
 
+// Problems with the whole file stop the parse with a StatementParseError.
+// expectCode() checks the error type, its code, and that it has a real message for the user.
 describe("whole-file failures throw StatementParseError with a friendly message", () => {
   const expectCode = (input, code) =>
     assert.throws(
@@ -183,6 +198,7 @@ describe("whole-file failures throw StatementParseError with a friendly message"
   test("binary data", () => expectCode(Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01, 0x02]), "not_text"));
 });
 
+// Safety caps so a huge or garbage file can't blow up the import record
 describe("limits", () => {
   test("error list is capped at 100 but the true count is kept", () => {
     const bad = Array.from({ length: 150 }, () => "nope,Thing,-1").join("\n");
@@ -198,6 +214,8 @@ describe("limits", () => {
   });
 });
 
+// Table-driven tests: each [input, expected] pair becomes its own test.
+// null means "not a valid date".
 describe("parseDate", () => {
   const cases = [
     ["2026-09-05", "2026-09-05"],
@@ -222,6 +240,7 @@ describe("parseDate", () => {
   }
 });
 
+// null = empty cell (missing amount); NaN = something that isn't money
 describe("parseMoney", () => {
   const cases = [
     ["45.00", 45],

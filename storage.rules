@@ -1,10 +1,21 @@
 rules_version = '2';
+
+// storage.rules
+//
+// Who can upload and download files in Firebase Storage.
+// The web app uploads statements to users/{uid}/imports/{timestamp}_{fileName}
+// (src/lib/uploads.js). A finished upload there triggers the
+// onStatementUploaded Cloud Function (functions/index.js).
+
 service firebase.storage {
   match /b/{bucket}/o {
     // Each user can upload and read only their own statement files.
     // Limits: must be logged in, max 10 MB, CSV or PDF only.
     match /users/{uid}/imports/{fileName} {
       allow read: if request.auth != null && request.auth.uid == uid;
+      // Uploading a new file. There's no update or delete rule, so once uploaded a
+      // file can't be overwritten or removed from the app.
+      // contentType is checked, not the file name, which is why uploads.js sets it explicitly.
       allow create: if request.auth != null && request.auth.uid == uid
         && request.resource.size < 10 * 1024 * 1024
         && (request.resource.contentType == 'text/csv'
