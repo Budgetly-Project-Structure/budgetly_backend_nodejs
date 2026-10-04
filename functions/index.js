@@ -56,15 +56,13 @@ function importIdFor(bucket, filePath, generation) {
 // --- Function --------------------------------------------------------------
 // Parsing and writing take longer than the 60 s default allows for big files
 exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (event) => {
+  const startedAt = Date.now();
   // Full path of the uploaded file, e.g. "users/abc123/imports/1696000000_jan.csv"
   const filePath = event.data.name;
   const parts = filePath.split("/");
 
   // 1. FILTER: this fires for EVERY file uploaded to the bucket,
   //    so exit unless the path is users/{uid}/imports/{fileName}
-  //    Note: creating a folder in the emulator's Storage UI uploads an empty
-  //    placeholder like "users/abc/imports/" (fileName = ""). It passes this
-  //    check and then gets skipped by the file-type check in step 3.
   if (parts.length !== 4 || parts[0] !== "users" || parts[2] !== "imports") {
     return;
   }
@@ -119,6 +117,8 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
   }
 
   // 6. PARSE, SAVE and record the outcome (never throws; always ends completed/failed)
-  const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, store, logger });
+  // Leave 20 s of the 120 s limit to record "failed" if parsing/saving runs out of time
+  const timeoutMs = Math.max(5000, 100 * 1000 - (Date.now() - startedAt));
+  const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, store, logger, timeoutMs });
   logger.info("Import finished", { uid, importId, ...result });
 });
