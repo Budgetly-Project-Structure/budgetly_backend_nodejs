@@ -14,7 +14,7 @@ const path = require("node:path");
 
 const { toTransactionDocs, transactionId } = require("../lib/transactions");
 const { createStore, BATCH_SIZE } = require("../lib/firestoreStore");
-const { processImport, PDF_NOT_READY, UNEXPECTED } = require("../lib/importPipeline");
+const { processImport, PDF_NOT_READY, UNEXPECTED, TIMED_OUT } = require("../lib/importPipeline");
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name));
 const silentLogger = { info() {}, warn() {}, error() {} };
@@ -265,5 +265,35 @@ describe("processImport: failures (SCRUM-28)", () => {
     };
     const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv") });
     assert.equal(result.status, "failed");
+  });
+});
+
+describe("processImport: timeouts (SCRUM-28)", () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  test("saving takes too long -> marked failed, never left on 'processing'", async () => {
+    const store = fakeStore();
+    store.writeTransactions = async () => sleep(200); // slower than the deadline below
+    const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv"), timeoutMs: 50 });
+    assert.equal(result.status, "failed");
+    assert.equal(result.error, TIMED_OUT);
+    assert.deepEqual(last(store), { status: "failed", error: TIMED_OUT, transactionCount: 0 });
+    assert.ok(store.deleted >= 1);
+  });
+
+  test("a save that finishes after the deadline is rolled back and never marked completed", async () => {
+    const store = fakeStore();
+    store.writeTransactions = async () => sleep(100);
+    await run(store, { fileBuffer: fixture("checking_sept_2026.csv"), timeoutMs: 30 });
+    await sleep(250); // let the slow write finish in the background
+    assert.ok(store.updates.every((u) => u.status !== "completed"));
+    assert.equal(last(store).status, "failed");
+    assert.ok(store.deleted >= 2); // once at the deadline, once after the late write landed
+  });
+
+  test("finishing before the deadline is unaffected", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv"), timeoutMs: 5000 });
+    assert.equal(result.status, "completed");
   });
 });
