@@ -14,7 +14,7 @@ const path = require("node:path");
 
 const { toTransactionDocs, transactionId } = require("../lib/transactions");
 const { createStore, BATCH_SIZE } = require("../lib/firestoreStore");
-const { processImport, PDF_NOT_READY, UNEXPECTED, TIMED_OUT } = require("../lib/importPipeline");
+const { processImport, UNSUPPORTED_TYPE, UNEXPECTED, TIMED_OUT } = require("../lib/importPipeline");
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name));
 const silentLogger = { info() {}, warn() {}, error() {} };
@@ -201,6 +201,18 @@ describe("processImport: happy path", () => {
   });
 });
 
+describe("processImport: PDF statements (SCRUM-25)", () => {
+  test("a text PDF is parsed and saved like a CSV", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileType: "pdf", fileBuffer: fixture("bank_a_checking_sept_2026.pdf") });
+    assert.equal(result.status, "completed");
+    assert.equal(result.transactionCount, 37);
+    assert.equal(store.written.length, 37);
+    assert.ok(store.written.every((d) => d.sourceStatementId === "imp1" && d.userId === "alice"));
+    assert.equal(last(store).error, null);
+  });
+});
+
 describe("processImport: partial failures (SCRUM-27)", () => {
   test("bad rows are skipped, good rows are kept, and the skips are reported", async () => {
     const store = fakeStore();
@@ -233,12 +245,26 @@ describe("processImport: failures (SCRUM-28)", () => {
     assert.equal(store.deleted, 0);
   });
 
-  test("PDF -> failed with a clear next step until SCRUM-25 is done", async () => {
+  test("a file that isn't a real PDF -> failed with a readable message", async () => {
     const store = fakeStore();
     const result = await run(store, { fileType: "pdf", fileBuffer: Buffer.from("%PDF-1.7") });
     assert.equal(result.status, "failed");
-    assert.equal(result.error, PDF_NOT_READY);
+    assert.match(result.error, /couldn't open this PDF/);
     assert.equal(store.written.length, 0);
+  });
+
+  test("a scanned PDF -> failed with the 'unsupported PDF' message", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileType: "pdf", fileBuffer: fixture("scanned_statement.pdf") });
+    assert.equal(result.status, "failed");
+    assert.match(result.error, /unsupported PDF/);
+    assert.equal(store.written.length, 0);
+  });
+
+  test("an unknown file type -> failed", async () => {
+    const store = fakeStore();
+    const result = await run(store, { fileType: "xlsx", fileBuffer: Buffer.from("x") });
+    assert.equal(result.error, UNSUPPORTED_TYPE);
   });
 
   test("unexpected error while saving -> partial writes are cleaned up, generic message shown", async () => {

@@ -23,9 +23,10 @@
 "use strict";
 
 const { parseStatementCsv, StatementParseError } = require("./csvParser");
+const { parseStatementPdf } = require("./pdfParser");
 const { toTransactionDocs } = require("./transactions");
 
-const PDF_NOT_READY = "PDF statements aren't supported yet. Please export this statement as a CSV and upload that instead.";
+const UNSUPPORTED_TYPE = "This file type isn't supported. Please upload a CSV or PDF statement.";
 const NOTHING_READABLE = "We couldn't read any transactions from this file.";
 const UNEXPECTED = "Something went wrong while importing this file. Please try again.";
 const TIMED_OUT = "This file took too long to import. Please try again, or split it into smaller files.";
@@ -55,10 +56,10 @@ async function runImport({ fileBuffer, fileType, uid, importId, accountId = null
   try {
     await store.update({ status: "processing" });
 
-    // PDF parsing is SCRUM-25; until then fail with a clear next step
-    if (fileType !== "csv") return await fail(PDF_NOT_READY);
+    if (fileType !== "csv" && fileType !== "pdf") return await fail(UNSUPPORTED_TYPE);
 
-    const parsed = parseStatementCsv(fileBuffer);
+    // Both parsers return the same shape, so everything below doesn't care which one ran
+    const parsed = fileType === "pdf" ? await parseStatementPdf(fileBuffer) : parseStatementCsv(fileBuffer);
 
     if (parsed.transactions.length === 0) {
       const first = parsed.errors[0];
@@ -143,4 +144,4 @@ async function processImport(opts) {
   return { status: "failed", transactionCount: 0, skippedRowCount: 0, error: TIMED_OUT };
 }
 
-module.exports = { processImport, PDF_NOT_READY, NOTHING_READABLE, UNEXPECTED, TIMED_OUT };
+module.exports = { processImport, UNSUPPORTED_TYPE, NOTHING_READABLE, UNEXPECTED, TIMED_OUT };
