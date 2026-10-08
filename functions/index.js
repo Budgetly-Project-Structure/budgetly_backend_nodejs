@@ -13,6 +13,10 @@
  * importPipeline.js, firestoreStore.js). PDF parsing is SCRUM-25; until then
  * PDF imports end as "failed" with a message asking for a CSV.
  *
+ * deleteImport (callable)
+ * The web app's "Delete" button on the Import page. Removes an import's
+ * transactions, its file in Storage and its import record (lib/deleteImport.js).
+ *
  * Storage path:   users/{uid}/imports/{fileName}
  * Firestore docs: users/{uid}/imports/{importId}
  *                 users/{uid}/transactions/{importId}_{rowNumber}
@@ -22,6 +26,8 @@
 const crypto = require("node:crypto");
 // Trigger that fires when a Storage upload completes
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
+// Callable functions: the web app calls these directly with httpsCallable()
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
 // Admin SDK: server-side access to Firestore and Storage (bypasses security rules)
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
@@ -31,6 +37,7 @@ const logger = require("firebase-functions/logger");
 
 const { createStore } = require("./lib/firestoreStore");
 const { processImport } = require("./lib/importPipeline");
+const { deleteImport, DeleteImportError } = require("./lib/deleteImport");
 
 // --- Setup -----------------------------------------------------------------
 // Runs once when the function starts, not on every upload
@@ -121,4 +128,27 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
   const timeoutMs = Math.max(5000, 100 * 1000 - (Date.now() - startedAt));
   const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, store, logger, timeoutMs });
   logger.info("Import finished", { uid, importId, ...result });
+});
+
+/**
+ * deleteImport({ importId }) -> { deletedTransactions }
+ * Only the signed-in owner can delete an import. User-facing problems (not
+ * found, still importing...) come back as HttpsErrors with a readable message.
+ */
+exports.deleteImport = onCall(async (request) => {
+  const uid = request.auth?.uid ?? null;
+  try {
+    return await deleteImport({
+      uid,
+      importId: request.data?.importId,
+      openStore: (importId) => createStore({ db, uid, importId }),
+      // Uploads go to the project's default bucket (web app src/lib/uploads.js)
+      deleteFile: (path) => getStorage().bucket().file(path).delete({ ignoreNotFound: true }),
+      logger,
+    });
+  } catch (err) {
+    if (err instanceof DeleteImportError) throw new HttpsError(err.code, err.message);
+    logger.error("Delete import failed", { uid, importId: request.data?.importId, message: err.message });
+    throw new HttpsError("internal", "We couldn't delete this statement. Please try again.");
+  }
 });
