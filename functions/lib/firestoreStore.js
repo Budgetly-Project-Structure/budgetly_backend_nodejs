@@ -1,18 +1,23 @@
 /**
  * firestoreStore.js (SCRUM-26)
  *
- * The only place the import pipeline touches Firestore. It exposes three
- * small operations for one import, so importPipeline.js stays free of
- * Firebase code and can be unit tested with a fake store.
+ * The only place the import pipeline touches Firestore. It exposes a few
+ * small operations for one import, so importPipeline.js and deleteImport.js
+ * stay free of Firebase code and can be unit tested with a fake store.
  *
  *   update(patch)              merge fields into users/{uid}/imports/{importId}
  *   writeTransactions(docs)    save transactions in batches
  *   deleteTransactions()       remove everything this import wrote (cleanup after a failure)
+ *   get()                      the import doc's data, or null if it doesn't exist
+ *   deleteTransactionBatch()   delete up to DELETE_BATCH_SIZE of its transactions, returns how many
+ *   deleteImportDoc()          delete the import doc itself
  */
 "use strict";
 
 // Firestore allows 500 operations per batch; stay under it
 const BATCH_SIZE = 450;
+// Deleting a whole import (deleteImport.js) uses a smaller batch
+const DELETE_BATCH_SIZE = 400;
 
 /** Loaded lazily so unit tests can run without firebase-admin installed. */
 function defaultServerTimestamp() {
@@ -60,7 +65,28 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
         await batch.commit();
       }
     },
+
+    async get() {
+      const snap = await importRef.get();
+      return snap.exists ? snap.data() : null;
+    },
+
+    async deleteTransactionBatch() {
+      const snap = await txnCol
+        .where("sourceStatementId", "==", importId)
+        .limit(DELETE_BATCH_SIZE)
+        .get();
+      if (snap.empty) return 0;
+      const batch = db.batch();
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      return snap.size;
+    },
+
+    async deleteImportDoc() {
+      await importRef.delete();
+    },
   };
 }
 
-module.exports = { createStore, BATCH_SIZE };
+module.exports = { createStore, BATCH_SIZE, DELETE_BATCH_SIZE };
