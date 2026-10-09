@@ -79,6 +79,10 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
   const fileName = parts[3];
   const ext = fileName.split(".").pop().toLowerCase();
   const accountId = event.data.metadata?.accountId || null;
+  // "credit" or "checking" (anything else is treated as unknown)
+  const accountType = ["credit", "checking"].includes(event.data.metadata?.accountType)
+    ? event.data.metadata.accountType
+    : null;
 
   // 3. VALIDATE file type (Storage rules already block others; this is a backup)
   if (!ALLOWED_TYPES.includes(ext)) {
@@ -101,6 +105,7 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
       storagePath: filePath,             // where the parser downloads it from
       fileType: ext,                     // "csv" or "pdf": decides which parser runs
       accountId,                         // which account the statement is for (may be null)
+      accountType,                       // "credit", "checking" or null
       sizeBytes: Number(event.data.size),
       status: "uploaded",                // lifecycle: uploaded → processing → completed | failed
       uploadedAt: FieldValue.serverTimestamp(),
@@ -126,7 +131,7 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
   // 6. PARSE, SAVE and record the outcome (never throws; always ends completed/failed)
   // Leave 20 s of the 120 s limit to record "failed" if parsing/saving runs out of time
   const timeoutMs = Math.max(5000, 100 * 1000 - (Date.now() - startedAt));
-  const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, store, logger, timeoutMs });
+  const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, accountType, store, logger, timeoutMs });
   logger.info("Import finished", { uid, importId, ...result });
 });
 
