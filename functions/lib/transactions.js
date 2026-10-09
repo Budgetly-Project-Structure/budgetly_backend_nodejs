@@ -12,16 +12,20 @@
  *     date              Firestore Timestamp (a JS Date here; the Admin SDK converts it)
  *     merchant          raw merchant text from the statement
  *     amount            dollars, negative = spending, positive = income
- *     category          "uncategorized" until the AI step runs (a later ticket)
- *     categoryConfidence  null until categorized
- *     categorySource    "none" until categorized; the Firestore rules only let
- *                       the owner change a category when this is set to "user"
+ *     category          "transfers" for credit card payments (transferRules.js),
+ *                       otherwise "uncategorized" until the AI step runs (a later ticket)
+ *     categoryConfidence  1 for a rule match, otherwise null until categorized
+ *     categorySource    "rule" for a rule match, otherwise "none" until categorized;
+ *                       the Firestore rules only let the owner change a category
+ *                       when this is set to "user"
  *     isUserCorrected   false
  *     accountId         which account the statement belongs to, or null
  *     sourceStatementId the import doc this transaction came from (the "statementId")
  *     createdAt         added by the writer (server timestamp)
  */
 "use strict";
+
+const { categorizeByRules } = require("./transferRules");
 
 /**
  * Dates are stored at 12:00 UTC. A bare midnight timestamp can display as the
@@ -45,19 +49,18 @@ function transactionId(importId, rowNumber) {
 /**
  * @param {{date: string, merchant: string, amount: number, rowNumber: number}[]} parsed
  *        `transactions` from parseStatementCsv
- * @param {{uid: string, importId: string, accountId?: string|null}} ctx
+ * @param {{uid: string, importId: string, accountId?: string|null, accountType?: string|null}} ctx
+ *        accountType ("credit" or "checking") helps spot card payments
  * @returns {Object[]} documents; `id` is the Firestore doc ID (the writer removes it from the data)
  */
-function toTransactionDocs(parsed, { uid, importId, accountId = null }) {
+function toTransactionDocs(parsed, { uid, importId, accountId = null, accountType = null }) {
   return parsed.map((t) => ({
     id: transactionId(importId, t.rowNumber),
     userId: uid,
     date: dateToNoonUtc(t.date),
     merchant: t.merchant,
     amount: t.amount,
-    category: "uncategorized",
-    categoryConfidence: null,
-    categorySource: "none",
+    ...categorizeByRules(t.merchant, t.amount, accountType),
     isUserCorrected: false,
     accountId: accountId || null,
     sourceStatementId: importId,

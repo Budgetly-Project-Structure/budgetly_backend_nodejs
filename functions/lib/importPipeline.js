@@ -42,12 +42,18 @@ const TIMEOUT = Symbol("timeout");
  * @param {string} opts.uid
  * @param {string} opts.importId
  * @param {string|null} [opts.accountId]
+ * @param {string|null} [opts.accountType]  "credit" or "checking": card statements may list
+ *                                          purchases as positive numbers, and card payments
+ *                                          are marked as transfers
  * @param {Object} opts.store        From createStore()
  * @param {Object} [opts.logger]     firebase-functions logger (defaults to console)
  * @param {number} [opts.timeoutMs]  Give up and mark the import failed after this long
  * @returns {Promise<{status: "completed"|"failed", transactionCount: number, skippedRowCount: number, error?: string}>}
  */
-async function runImport({ fileBuffer, fileType, uid, importId, accountId = null, store, logger = console }, state) {
+async function runImport(
+  { fileBuffer, fileType, uid, importId, accountId = null, accountType = null, store, logger = console },
+  state
+) {
   const fail = async (message) => {
     await store.update({ status: "failed", error: message, transactionCount: 0 });
     return { status: "failed", transactionCount: 0, skippedRowCount: 0, error: message };
@@ -59,14 +65,19 @@ async function runImport({ fileBuffer, fileType, uid, importId, accountId = null
     if (fileType !== "csv" && fileType !== "pdf") return await fail(UNSUPPORTED_TYPE);
 
     // Both parsers return the same shape, so everything below doesn't care which one ran
-    const parsed = fileType === "pdf" ? await parseStatementPdf(fileBuffer) : parseStatementCsv(fileBuffer);
+    let parsed = fileType === "pdf" ? await parseStatementPdf(fileBuffer) : parseStatementCsv(fileBuffer);
+    // Many card exports list purchases as positive numbers. On a credit account with one
+    // Amount column where most rows are positive, read it again with the signs flipped.
+    if (fileType === "csv" && accountType === "credit" && purchasesLookPositive(parsed)) {
+      parsed = parseStatementCsv(fileBuffer, { invertSigns: true });
+    }
 
     if (parsed.transactions.length === 0) {
       const first = parsed.errors[0];
       return await fail(first ? `${NOTHING_READABLE} Line ${first.row}: ${first.reason}.` : NOTHING_READABLE);
     }
 
-    const docs = toTransactionDocs(parsed.transactions, { uid, importId, accountId });
+    const docs = toTransactionDocs(parsed.transactions, { uid, importId, accountId, accountType });
     if (state.timedOut) return null; // already marked failed; don't start writing
     await store.writeTransactions(docs);
     if (state.timedOut) {
@@ -111,6 +122,18 @@ async function runImport({ fileBuffer, fileType, uid, importId, accountId = null
   }
 }
 
+/**
+ * True when a parsed CSV has a single Amount column (no Debit/Credit columns or
+ * type column deciding the sign) and more than half of its rows are positive:
+ * on a card statement that means purchases were written as positive numbers.
+ */
+function purchasesLookPositive(parsed) {
+  const cols = parsed.meta?.columns ?? {};
+  if (!cols.amount || cols.debit || cols.credit || cols.type) return false;
+  const list = parsed.transactions;
+  return list.length > 0 && list.filter((t) => t.amount > 0).length > list.length / 2;
+}
+
 async function processImport(opts) {
   const { store, uid, importId, logger = console, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
   const state = { timedOut: false };
@@ -144,4 +167,4 @@ async function processImport(opts) {
   return { status: "failed", transactionCount: 0, skippedRowCount: 0, error: TIMED_OUT };
 }
 
-module.exports = { processImport, UNSUPPORTED_TYPE, NOTHING_READABLE, UNEXPECTED, TIMED_OUT };
+module.exports = { processImport, purchasesLookPositive, UNSUPPORTED_TYPE, NOTHING_READABLE, UNEXPECTED, TIMED_OUT };
