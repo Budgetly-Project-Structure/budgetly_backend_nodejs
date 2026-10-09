@@ -21,6 +21,7 @@
 "use strict";
 
 const { TRANSFER_CATEGORY, uncategorizedFields } = require("./categories");
+const { categorizeMerchant } = require("./merchantRules");
 
 // A payment received on a card statement
 const CARD_PAYMENT = /\b(payments?\s*[-,]?\s*thank\s*you|automatic\s+payment|auto\s*-?\s*pay|online\s+payment)\b/i;
@@ -49,8 +50,9 @@ function isCardPayment(merchant, amount, accountType = null) {
 }
 
 /**
- * The category fields for a transaction: a transfer if a rule matches,
- * otherwise uncategorized (until the AI step or the user sets one).
+ * The category fields for a transaction from the free rules: a transfer for a
+ * card payment, then a category from the merchant keyword list (merchantRules.js),
+ * otherwise uncategorized (until the user, or a later AI step, sets one).
  *
  * @returns {{category: string, categoryConfidence: number|null, categorySource: string}}
  */
@@ -58,7 +60,7 @@ function categorizeByRules(merchant, amount, accountType = null) {
   if (isCardPayment(merchant, amount, accountType)) {
     return { category: TRANSFER_CATEGORY, categoryConfidence: 1, categorySource: "rule" };
   }
-  return uncategorizedFields();
+  return categorizeMerchant(merchant, amount) ?? uncategorizedFields();
 }
 
 module.exports = { isCardPayment, categorizeByRules, TRANSFER_CATEGORY };

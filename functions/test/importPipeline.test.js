@@ -34,9 +34,10 @@ describe("toTransactionDocs", () => {
       date: new Date("2026-09-02T12:00:00Z"),
       merchant: "Starbucks",
       amount: -6.45,
-      category: "uncategorized",
-      categoryConfidence: null,
-      categorySource: "none",
+      // Starbucks is on the free merchant keyword list (merchantRules.js)
+      category: "dining",
+      categoryConfidence: 0.9,
+      categorySource: "rule",
       isUserCorrected: false,
       accountId: "acct-checking",
       sourceStatementId: "imp123",
