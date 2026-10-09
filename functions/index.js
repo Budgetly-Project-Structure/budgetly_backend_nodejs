@@ -17,6 +17,11 @@
  * The web app's "Delete" button on the Import page. Removes an import's
  * transactions, its file in Storage and its import record (lib/deleteImport.js).
  *
+ * categorizeTransactions (callable, SCRUM-71)
+ * Asks Claude (Haiku 5.5) for the category of the user's transactions that
+ * nothing has categorized yet, and saves the answers (lib/categorizeJob.js).
+ * Needs the ANTHROPIC_API_KEY secret:  firebase functions:secrets:set ANTHROPIC_API_KEY
+ *
  * Storage path:   users/{uid}/imports/{fileName}
  * Firestore docs: users/{uid}/imports/{importId}
  *                 users/{uid}/transactions/{importId}_{rowNumber}
@@ -28,6 +33,8 @@ const crypto = require("node:crypto");
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
 // Callable functions: the web app calls these directly with httpsCallable()
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+// Secrets live in Google Secret Manager, not in code (SCRUM-70)
+const { defineSecret } = require("firebase-functions/params");
 // Admin SDK: server-side access to Firestore and Storage (bypasses security rules)
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
@@ -38,11 +45,16 @@ const logger = require("firebase-functions/logger");
 const { createStore } = require("./lib/firestoreStore");
 const { processImport } = require("./lib/importPipeline");
 const { deleteImport, DeleteImportError } = require("./lib/deleteImport");
+const { createClaudeClassifier } = require("./lib/aiClient");
+const { runCategorization } = require("./lib/categorizeJob");
 
 // --- Setup -----------------------------------------------------------------
 // Runs once when the function starts, not on every upload
 initializeApp();
 const db = getFirestore();
+
+// The Claude API key (SCRUM-70). Only functions that list it in `secrets` can read it.
+const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 
 // Only these file types are accepted as statements
 const ALLOWED_TYPES = ["csv", "pdf"];
@@ -157,3 +169,33 @@ exports.deleteImport = onCall(async (request) => {
     throw new HttpsError("internal", "We couldn't delete this statement. Please try again.");
   }
 });
+
+/**
+ * categorizeTransactions({ importId? }) -> { checked, categorized, leftUncategorized, more }
+ * Categorizes up to 500 of the signed-in user's uncategorized transactions (only
+ * one import's, if importId is given). Call again while `more` is true.
+ * Transactions the AI can't place stay Uncategorized (SCRUM-72).
+ */
+exports.categorizeTransactions = onCall(
+  { secrets: [anthropicApiKey], timeoutSeconds: 300, memory: "512MiB" },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) throw new HttpsError("unauthenticated", "Please sign in again.");
+    const importId = request.data?.importId ?? null;
+    if (importId !== null && (typeof importId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(importId))) {
+      throw new HttpsError("invalid-argument", "That statement ID isn't valid.");
+    }
+    try {
+      return await runCategorization({
+        db,
+        uid,
+        importId,
+        classify: createClaudeClassifier({ apiKey: anthropicApiKey.value() }),
+        logger,
+      });
+    } catch (err) {
+      logger.error("Categorization failed", { uid, importId, message: err.message });
+      throw new HttpsError("internal", "We couldn't categorize your transactions. Please try again.");
+    }
+  }
+);
