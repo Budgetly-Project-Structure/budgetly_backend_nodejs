@@ -20,8 +20,7 @@
  */
 "use strict";
 
-// Category id the web app shows as "Transfer"
-const TRANSFER_CATEGORY = "transfers";
+const { TRANSFER_CATEGORY, uncategorizedFields } = require("./categories");
 
 // A payment received on a card statement
 const CARD_PAYMENT = /\b(payments?\s*[-,]?\s*thank\s*you|automatic\s+payment|auto\s*-?\s*pay|online\s+payment)\b/i;
@@ -59,7 +58,7 @@ function categorizeByRules(merchant, amount, accountType = null) {
   if (isCardPayment(merchant, amount, accountType)) {
     return { category: TRANSFER_CATEGORY, categoryConfidence: 1, categorySource: "rule" };
   }
-  return { category: "uncategorized", categoryConfidence: null, categorySource: "none" };
+  return uncategorizedFields();
 }
 
 module.exports = { isCardPayment, categorizeByRules, TRANSFER_CATEGORY };
