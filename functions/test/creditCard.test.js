@@ -101,7 +101,7 @@ describe("isCardPayment", () => {
       categoryConfidence: 1,
       categorySource: "rule",
     });
-    assert.deepEqual(categorizeByRules("Starbucks", -6.45, "credit"), {
+    assert.deepEqual(categorizeByRules("SQ *MKT 4471", -6.45, "credit"), {
       category: "uncategorized",
       categoryConfidence: null,
       categorySource: "none",
@@ -118,7 +118,8 @@ describe("isCardPayment", () => {
     );
     assert.equal(docs[0].category, "transfers");
     assert.equal(docs[0].categorySource, "rule");
-    assert.equal(docs[1].category, "uncategorized");
+    // The card-payment rule runs first; Starbucks then matches the merchant keyword list
+    assert.equal(docs[1].category, "dining");
   });
 });
 
@@ -178,6 +179,6 @@ describe("processImport: credit card statements", () => {
   test("checking statements are unchanged: no transfers among ordinary bills and paychecks", async () => {
     const { docs } = await importFile("checking_sept_2026.csv", "checking");
     assert.equal(docs.length, 36);
-    assert.ok(docs.every((d) => d.category === "uncategorized"));
+    assert.ok(docs.every((d) => d.category !== "transfers"));
   });
 });

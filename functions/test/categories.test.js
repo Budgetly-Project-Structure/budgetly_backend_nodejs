@@ -51,7 +51,8 @@ describe("categories", () => {
   });
 
   test("the transfer rules use ids from this list", () => {
-    assert.deepEqual(categorizeByRules("Starbucks", -5, "credit"), uncategorizedFields());
+    assert.deepEqual(categorizeByRules("SQ *MKT 4471", -5, "credit"), uncategorizedFields());
+    assert.ok(isKnownCategory(categorizeByRules("Starbucks", -5, "credit").category));
     assert.ok(isKnownCategory(categorizeByRules("PAYMENT THANK YOU", 100, "credit").category));
   });
 });
