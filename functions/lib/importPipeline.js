@@ -19,6 +19,10 @@
  * running out of time: Google kills a function that hits its timeout and no
  * code runs after that, so the pipeline gives up on its own a bit earlier
  * (timeoutMs) and marks the import failed while it still can.
+ *
+ * Categorizing (SCRUM-73): between parsing and saving, the optional `categorizer`
+ * (importCategorization.js) gives the transactions their categories, for CSV and
+ * PDF alike. If it throws anyway, the import is saved without those categories.
  */
 "use strict";
 
@@ -47,11 +51,13 @@ const TIMEOUT = Symbol("timeout");
  *                                          are marked as transfers
  * @param {Object} opts.store        From createStore()
  * @param {Object} [opts.logger]     firebase-functions logger (defaults to console)
+ * @param {Function} [opts.categorizer]  async (docs) => ({docs, summary}), from createImportCategorizer();
+ *                                    without one, transactions are saved with just the free rules
  * @param {number} [opts.timeoutMs]  Give up and mark the import failed after this long
  * @returns {Promise<{status: "completed"|"failed", transactionCount: number, skippedRowCount: number, error?: string}>}
  */
 async function runImport(
-  { fileBuffer, fileType, uid, importId, accountId = null, accountType = null, store, logger = console },
+  { fileBuffer, fileType, uid, importId, accountId = null, accountType = null, store, logger = console, categorizer = null },
   state
 ) {
   const fail = async (message) => {
@@ -77,7 +83,17 @@ async function runImport(
       return await fail(first ? `${NOTHING_READABLE} Line ${first.row}: ${first.reason}.` : NOTHING_READABLE);
     }
 
-    const docs = toTransactionDocs(parsed.transactions, { uid, importId, accountId, accountType });
+    let docs = toTransactionDocs(parsed.transactions, { uid, importId, accountId, accountType });
+    if (categorizer) {
+      // A bonus step: if it breaks, save the transactions without these categories
+      try {
+        const categorized = await categorizer(docs);
+        docs = categorized.docs;
+        logger.info("Import categorized", { uid, importId, ...categorized.summary });
+      } catch (err) {
+        logger.error("Categorizing failed; saving the import without it", { uid, importId, message: err.message });
+      }
+    }
     if (state.timedOut) return null; // already marked failed; don't start writing
     await store.writeTransactions(docs);
     if (state.timedOut) {
