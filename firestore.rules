@@ -17,6 +17,23 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == uid;
     }
 
+    // The exact shape of a manual transaction (SCRUM-86): a known set of fields,
+    // owned by this user, marked source 'manual', with a real date, a merchant of
+    // 1-100 characters, and a non-zero amount (negative = spending, positive = income).
+    function isManualTxn(uid, d) {
+      return d.keys().hasOnly(['userId','date','merchant','amount','category','categorySource',
+                               'categoryConfidence','isUserCorrected','accountId',
+                               'sourceStatementId','source','createdAt','updatedAt'])
+        && d.keys().hasAll(['userId','date','merchant','amount','category','source'])
+        && d.userId == uid
+        && d.source == 'manual'
+        && d.date is timestamp
+        && d.merchant is string && d.merchant.size() > 0 && d.merchant.size() <= 100
+        && d.amount is number && d.amount != 0
+        && d.category is string
+        && d.categorySource == 'user';
+    }
+
     // The user's profile document (created at signup by src/lib/auth.js)
     match /users/{uid} {
       allow read: if isOwner(uid);
@@ -31,8 +48,10 @@ service cloud.firestore {
       // No one can delete their profile from the app
       allow delete: if false;
 
-      // Transactions are created only by Cloud Functions (Admin SDK bypasses rules).
-      // Users may only re-categorize.
+      // Imported transactions are created only by Cloud Functions (Admin SDK bypasses
+      // rules), and for those the user may only re-categorize. Manual transactions
+      // (SCRUM-86, source == 'manual') are the user's own: they can add, edit and
+      // delete them, but only with the exact shape checked by isManualTxn.
       match /transactions/{txnId} {
         allow read: if isOwner(uid);
         // Re-categorizing: only these 3 fields may change, the category must be text,
@@ -42,8 +61,17 @@ service cloud.firestore {
                .hasOnly(['category','categorySource','updatedAt'])
           && request.resource.data.category is string
           && request.resource.data.categorySource == 'user';
-        // Users can't add or delete transactions (that would let them fake data)
-        allow create, delete: if false;
+        // Adding a manual transaction
+        allow create: if isOwner(uid) && isManualTxn(uid, request.resource.data);
+        // Editing a manual transaction (imported ones can't have their amount, date... changed)
+        allow update: if isOwner(uid)
+          && resource.data.get('source', '') == 'manual'
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['date','merchant','amount','category','accountId','updatedAt'])
+          && isManualTxn(uid, request.resource.data);
+        // Only manual transactions can be deleted here. Imported ones are removed
+        // together with their statement by the deleteImport Cloud Function.
+        allow delete: if isOwner(uid) && resource.data.get('source', '') == 'manual';
       }
 
       // Budgets (SCRUM-81): a monthly limit per category, one doc per category with the
