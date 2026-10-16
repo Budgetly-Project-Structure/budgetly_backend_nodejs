@@ -13,7 +13,7 @@
  * and unauthenticatedContext() is someone not logged in.
  */
 const { initializeTestEnvironment, assertFails, assertSucceeds } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, setDoc, updateDoc, deleteDoc } = require('firebase/firestore');
+const { doc, getDoc, setDoc, updateDoc, deleteDoc, Timestamp } = require('firebase/firestore');
 const fs = require('fs');
 
 // The test environment: an emulator connection that loads our real rules file
@@ -98,5 +98,66 @@ describe('Firestore security rules: budgets', () => {
   it('categoryId must match the document id and no extra fields are allowed', async () => {
     await assertFails(setDoc(budget(alice()), { categoryId: 'groceries', limit: 250 }));
     await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, note: 'x' }));
+  });
+});
+
+describe('Firestore security rules: manual transactions', () => {
+  const txn = (db, id = 'm1', user = 'alice') => doc(db, `users/${user}/transactions/${id}`);
+  // A valid manual transaction owned by alice
+  const manual = (extra = {}) => ({
+    userId: 'alice',
+    date: Timestamp.fromDate(new Date('2026-10-15T12:00:00Z')),
+    merchant: 'Farmers market',
+    amount: -23.5,
+    category: 'groceries',
+    categorySource: 'user',
+    categoryConfidence: 1,
+    isUserCorrected: true,
+    accountId: null,
+    sourceStatementId: null,
+    source: 'manual',
+    ...extra,
+  });
+  // Puts a manual transaction in the database as alice, bypassing the rules
+  const seed = () =>
+    env.withSecurityRulesDisabled((ctx) => setDoc(txn(ctx.firestore()), manual()));
+
+  it('owner can add a manual transaction', () =>
+    assertSucceeds(setDoc(txn(alice()), manual())));
+
+  it('cannot add one for someone else, or marked as imported', async () => {
+    await assertFails(setDoc(txn(alice()), manual({ userId: 'bob' })));
+    await assertFails(setDoc(txn(bob(), 'm1', 'alice'), manual()));
+    await assertFails(setDoc(txn(alice()), manual({ source: 'import' })));
+  });
+
+  it('rejects a bad amount, merchant, date or extra field', async () => {
+    await assertFails(setDoc(txn(alice()), manual({ amount: 0 })));
+    await assertFails(setDoc(txn(alice()), manual({ amount: '10' })));
+    await assertFails(setDoc(txn(alice()), manual({ merchant: '' })));
+    await assertFails(setDoc(txn(alice()), manual({ merchant: 'x'.repeat(101) })));
+    await assertFails(setDoc(txn(alice()), manual({ date: '2026-10-15' })));
+    await assertFails(setDoc(txn(alice()), manual({ note: 'extra' })));
+  });
+
+  it('owner can edit a manual transaction', async () => {
+    await seed();
+    await assertSucceeds(updateDoc(txn(alice()), { merchant: 'Aldi', amount: -30, category: 'groceries' }));
+  });
+
+  it('other user cannot edit or delete it', async () => {
+    await seed();
+    await assertFails(updateDoc(txn(bob(), 'm1', 'alice'), { merchant: 'Hacked' }));
+    await assertFails(deleteDoc(txn(bob(), 'm1', 'alice')));
+  });
+
+  it('owner can delete a manual transaction', async () => {
+    await seed();
+    await assertSucceeds(deleteDoc(txn(alice())));
+  });
+
+  it('imported transactions still cannot be edited (except category) or deleted', async () => {
+    await assertFails(updateDoc(txn(alice(), 't1'), { merchant: 'Changed' }));
+    await assertFails(deleteDoc(txn(alice(), 't1')));
   });
 });
