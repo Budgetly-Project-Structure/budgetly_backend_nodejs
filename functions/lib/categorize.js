@@ -6,6 +6,12 @@
  * Anything that fails a check falls back to Uncategorized, so categorization can
  * never break an import or leave bad data behind (SCRUM-72).
  *
+ * Large imports (SCRUM-74): the transactions go to the model 50 at a time, a few
+ * chunks in parallel. A chunk that fails only affects its own 50 transactions;
+ * every other chunk keeps its AI categories. `timeBudgetMs` caps how long new chunks
+ * may be started, so a big file can't run past the import's time limit: chunks that
+ * didn't start are left Uncategorized.
+ *
  * Pure logic: the model call is the `classify` function passed in (aiClient.js
  * in production, a fake in tests), so this file has no Firebase or SDK code.
  */
@@ -69,19 +75,34 @@ function readReply(reply, batch) {
  * @param {(request: Object) => Promise<Object>} opts.classify  Sends one batch to the model
  * @param {Object} [opts.logger]
  * @param {number} [opts.concurrency]
+ * @param {number} [opts.timeBudgetMs]  Stop starting new chunks after this long (default: no limit)
+ * @param {() => number} [opts.now]     Clock, replaced in tests
  * @returns {Promise<{fields: {category: string, categoryConfidence: number|null, categorySource: string}[],
- *                    categorized: number, fellBack: number, failedBatches: number}>}
+ *                    categorized: number, fellBack: number, failedBatches: number, skippedBatches: number}>}
  *          fields lines up with `transactions`. Never rejects.
+ *          failedBatches = chunks the model call failed for; skippedBatches = chunks never
+ *          sent because the time budget ran out.
  */
-async function categorizeTransactions(transactions, { classify, logger = console, concurrency = DEFAULT_CONCURRENCY }) {
+async function categorizeTransactions(
+  transactions,
+  { classify, logger = console, concurrency = DEFAULT_CONCURRENCY, timeBudgetMs = Infinity, now = Date.now }
+) {
+  const startedAt = now();
   const batches = [];
   for (let i = 0; i < transactions.length; i += BATCH_SIZE) batches.push(transactions.slice(i, i + BATCH_SIZE));
 
   let failedBatches = 0;
+  let skippedBatches = 0;
   const results = new Array(batches.length);
 
   async function run(index) {
     const batch = batches[index];
+    // Out of time: don't start another chunk, it would risk the import's deadline
+    if (now() - startedAt >= timeBudgetMs) {
+      skippedBatches++;
+      results[index] = batch.map(() => uncategorizedFields());
+      return;
+    }
     const request = {
       categories: AI_CATEGORIES,
       // Short ids for this request only, so no Firestore ids leave the backend
@@ -115,7 +136,10 @@ async function categorizeTransactions(transactions, { classify, logger = console
 
   const fields = results.flat();
   const categorized = fields.filter((f) => f.categorySource === "ai").length;
-  return { fields, categorized, fellBack: fields.length - categorized, failedBatches };
+  if (skippedBatches > 0) {
+    logger.warn("AI categorization ran out of time; the rest stays uncategorized", { skippedBatches, batches: batches.length });
+  }
+  return { fields, categorized, fellBack: fields.length - categorized, failedBatches, skippedBatches };
 }
 
 module.exports = { categorizeTransactions, readReply, BATCH_SIZE };

@@ -1,2 +1,5 @@
 node_modules/
 *.local
+# Local environment variables (may hold the Anthropic API key): never commit
+.env
+.env.*

@@ -17,6 +17,18 @@
  * The web app's "Delete" button on the Import page. Removes an import's
  * transactions, its file in Storage and its import record (lib/deleteImport.js).
  *
+ * Categorizing imports (SCRUM-73 to 75)
+ * onStatementUploaded categorizes every import (CSV and PDF) before saving it:
+ * free rules, then the user's merchant cache, then the AI in chunks of 50 (lib/
+ * importCategorization.js). The AI part is OFF by default so deploys stay free:
+ * turn it on by setting AI_CATEGORIZATION=on and ANTHROPIC_API_KEY in functions/.env
+ * (or see aiFunctions.js for the secret-based setup). Without it, imports still get
+ * the rules and the cache.
+ *
+ * onTransactionCategoryChanged
+ * When a user sets or edits a transaction's category, remember it for that merchant
+ * (users/{uid}/merchantCache, lib/merchantCache.js) so the next import reuses it.
+ *
  * categorizeTransactions (Claude, paid) is switched off: it lives in
  * aiFunctions.js, which this file doesn't load, so deploys stay free. See that
  * file for how to turn it on.
@@ -30,6 +42,8 @@
 const crypto = require("node:crypto");
 // Trigger that fires when a Storage upload completes
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
+// Trigger that fires when a Firestore document is created, changed or deleted
+const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 // Callable functions: the web app calls these directly with httpsCallable()
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 // Admin SDK: server-side access to Firestore and Storage (bypasses security rules)
@@ -42,6 +56,8 @@ const logger = require("firebase-functions/logger");
 const { createStore } = require("./lib/firestoreStore");
 const { processImport } = require("./lib/importPipeline");
 const { deleteImport, DeleteImportError } = require("./lib/deleteImport");
+const { createImportCategorizer } = require("./lib/importCategorization");
+const { createMerchantCache, cacheUpdateFor } = require("./lib/merchantCache");
 
 // --- Setup -----------------------------------------------------------------
 // Runs once when the function starts, not on every upload
@@ -50,6 +66,11 @@ const db = getFirestore();
 
 // Only these file types are accepted as statements
 const ALLOWED_TYPES = ["csv", "pdf"];
+
+// The AI step is off unless AI_CATEGORIZATION=on and a key is set (see the header)
+const AI_ENABLED = process.env.AI_CATEGORIZATION === "on" && Boolean(process.env.ANTHROPIC_API_KEY);
+// Built once; null when the AI is off (the SDK is only loaded when it's on)
+const classify = AI_ENABLED ? require("./lib/aiClient").createClaudeClassifier({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
 
 /**
  * Same upload -> same import ID. Cloud Functions can deliver an event more than
@@ -135,7 +156,9 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
   // 6. PARSE, SAVE and record the outcome (never throws; always ends completed/failed)
   // Leave 20 s of the 120 s limit to record "failed" if parsing/saving runs out of time
   const timeoutMs = Math.max(5000, 100 * 1000 - (Date.now() - startedAt));
-  const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, accountType, store, logger, timeoutMs });
+  // Categorize before saving: merchant rules, then this user's merchant cache, then the AI (if on)
+  const categorizer = createImportCategorizer({ cache: createMerchantCache({ db, uid }), classify, logger });
+  const result = await processImport({ fileBuffer, fileType: ext, uid, importId, accountId, accountType, store, logger, timeoutMs, categorizer });
   logger.info("Import finished", { uid, importId, ...result });
 });
 
@@ -159,5 +182,21 @@ exports.deleteImport = onCall(async (request) => {
     if (err instanceof DeleteImportError) throw new HttpsError(err.code, err.message);
     logger.error("Delete import failed", { uid, importId: request.data?.importId, message: err.message });
     throw new HttpsError("internal", "We couldn't delete this statement. Please try again.");
+  }
+});
+
+/**
+ * Remembers the user's category choices per merchant (SCRUM-75).
+ * Fires on every transaction write; cacheUpdateFor() decides whether a user just
+ * chose a category. Failing here only means the next import won't use that choice.
+ */
+exports.onTransactionCategoryChanged = onDocumentWritten("users/{uid}/transactions/{txnId}", async (event) => {
+  const { uid } = event.params;
+  const update = cacheUpdateFor(event.data?.before?.data() ?? null, event.data?.after?.data() ?? null);
+  if (!update) return;
+  try {
+    await createMerchantCache({ db, uid }).save(update.merchant, update.category);
+  } catch (err) {
+    logger.error("Could not update merchant cache", { uid, message: err.message });
   }
 });
