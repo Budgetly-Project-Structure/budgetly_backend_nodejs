@@ -13,7 +13,7 @@
  * and unauthenticatedContext() is someone not logged in.
  */
 const { initializeTestEnvironment, assertFails, assertSucceeds } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, setDoc, updateDoc } = require('firebase/firestore');
+const { doc, getDoc, setDoc, updateDoc, deleteDoc } = require('firebase/firestore');
 const fs = require('fs');
 
 // The test environment: an emulator connection that loads our real rules file
@@ -66,4 +66,37 @@ describe('Firestore security rules: transactions', () => {
 
   it('owner cannot change the amount', () =>
     assertFails(updateDoc(doc(alice(), 'users/alice/transactions/t1'), { amountCents: 0 })));
+});
+
+describe('Firestore security rules: budgets', () => {
+  const budget = (db, user = 'alice', cat = 'dining') => doc(db, `users/${user}/budgets/${cat}`);
+
+  it('owner can create a budget', () =>
+    assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 })));
+
+  it('owner can read, change and delete their budget', async () => {
+    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 }));
+    await assertSucceeds(getDoc(budget(alice())));
+    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 300 }));
+    await assertSucceeds(deleteDoc(budget(alice())));
+  });
+
+  it('other user cannot read or write it', async () => {
+    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 }));
+    await assertFails(getDoc(budget(bob())));
+    await assertFails(setDoc(budget(bob(), 'alice'), { categoryId: 'dining', limit: 1 }));
+  });
+
+  it('unauthenticated user cannot write one', () =>
+    assertFails(setDoc(budget(env.unauthenticatedContext().firestore()), { categoryId: 'dining', limit: 1 })));
+
+  it('limit must be a non-negative number', async () => {
+    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: -5 }));
+    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: '250' }));
+  });
+
+  it('categoryId must match the document id and no extra fields are allowed', async () => {
+    await assertFails(setDoc(budget(alice()), { categoryId: 'groceries', limit: 250 }));
+    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, note: 'x' }));
+  });
 });
