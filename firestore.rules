@@ -46,6 +46,19 @@ service cloud.firestore {
         allow create, delete: if false;
       }
 
+      // Budgets (SCRUM-81): a monthly limit per category, one doc per category with the
+      // category id as the doc id. Unlike transactions, the user owns these and may
+      // create, change and delete them, but only with this exact shape.
+      match /budgets/{categoryId} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid)
+          && request.resource.data.keys().hasOnly(['categoryId','limit','updatedAt'])
+          && request.resource.data.categoryId == categoryId
+          && request.resource.data.limit is number
+          && request.resource.data.limit >= 0;
+        allow delete: if isOwner(uid);
+      }
+
       // Import status is written by the server; the client only reads it.
       match /imports/{importId} {
         allow read: if isOwner(uid);
