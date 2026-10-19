@@ -34,17 +34,31 @@ service cloud.firestore {
         && d.categorySource == 'user';
     }
 
-    // The user's profile document (created at signup by src/lib/auth.js)
+    // Profile and settings values that must make sense (SCRUM-88): a name of 1-60
+    // characters, and a monthly income that is empty (null) or a dollar amount
+    // from 0 to 10 million. Fields that aren't on the document aren't checked.
+    function isValidProfile(d) {
+      return (!('displayName' in d)
+                || (d.displayName is string && d.displayName.size() > 0 && d.displayName.size() <= 60))
+        && (!('monthlyIncome' in d) || d.monthlyIncome == null
+                || (d.monthlyIncome is number && d.monthlyIncome >= 0 && d.monthlyIncome <= 10000000));
+    }
+
+    // The user's profile document (created at signup by src/lib/auth.js). It also
+    // holds their settings: monthlyIncome (SCRUM-84), used for the budget in a month
+    // where no money came in.
     match /users/{uid} {
       allow read: if isOwner(uid);
-      // Create: only these 4 fields are allowed, so no one can sneak in extra data
+      // Create: only these fields are allowed, so no one can sneak in extra data
       allow create: if isOwner(uid)
-        && request.resource.data.keys().hasOnly(['email','displayName','createdAt','consentAcceptedAt']);
-      // Update: only the display name and the consent timestamp can change.
-      // diff(...).affectedKeys() = the fields this write is changing.
+        && request.resource.data.keys().hasOnly(['email','displayName','createdAt','consentAcceptedAt','monthlyIncome'])
+        && isValidProfile(request.resource.data);
+      // Update: only the display name, the consent timestamp and the monthly income
+      // can change. diff(...).affectedKeys() = the fields this write is changing.
       allow update: if isOwner(uid)
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['displayName','consentAcceptedAt']);
+             .hasOnly(['displayName','consentAcceptedAt','monthlyIncome'])
+        && isValidProfile(request.resource.data);
       // No one can delete their profile from the app
       allow delete: if false;
 
