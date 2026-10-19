@@ -101,6 +101,57 @@ describe('Firestore security rules: budgets', () => {
   });
 });
 
+describe('Firestore security rules: profile and settings (SCRUM-88)', () => {
+  const profile = (db, user = 'alice') => doc(db, `users/${user}`);
+  // A profile like the one signup creates
+  const createProfile = () =>
+    env.withSecurityRulesDisabled((ctx) =>
+      setDoc(doc(ctx.firestore(), 'users/alice'), { email: 'alice@example.com', displayName: 'Alice', createdAt: Timestamp.now() }));
+
+  it('owner can set and change their monthly income', async () => {
+    await createProfile();
+    await assertSucceeds(updateDoc(profile(alice()), { monthlyIncome: 3200 }));
+    await assertSucceeds(updateDoc(profile(alice()), { monthlyIncome: 3450.5 }));
+  });
+
+  it('owner can clear their monthly income (null) or set it to 0', async () => {
+    await createProfile();
+    await assertSucceeds(updateDoc(profile(alice()), { monthlyIncome: null }));
+    await assertSucceeds(updateDoc(profile(alice()), { monthlyIncome: 0 }));
+  });
+
+  it('monthly income must be a dollar amount from 0 to 10 million', async () => {
+    await createProfile();
+    await assertFails(updateDoc(profile(alice()), { monthlyIncome: -100 }));
+    await assertFails(updateDoc(profile(alice()), { monthlyIncome: '3200' }));
+    await assertFails(updateDoc(profile(alice()), { monthlyIncome: 20000000 }));
+  });
+
+  it('owner can change their name and income together; the name must be 1-60 characters', async () => {
+    await createProfile();
+    await assertSucceeds(updateDoc(profile(alice()), { displayName: 'Alice P', monthlyIncome: 2000 }));
+    await assertFails(updateDoc(profile(alice()), { displayName: '' }));
+    await assertFails(updateDoc(profile(alice()), { displayName: 'x'.repeat(61) }));
+  });
+
+  it('other fields still cannot be changed', async () => {
+    await createProfile();
+    await assertFails(updateDoc(profile(alice()), { email: 'someone@else.com' }));
+    await assertFails(updateDoc(profile(alice()), { monthlyIncome: 3000, isAdmin: true }));
+  });
+
+  it('other users cannot read or change it', async () => {
+    await createProfile();
+    await assertFails(getDoc(profile(bob(), 'alice')));
+    await assertFails(updateDoc(profile(bob(), 'alice'), { monthlyIncome: 1 }));
+  });
+
+  it('a missing profile can be created with the allowed fields, including monthly income', async () => {
+    await assertSucceeds(setDoc(profile(alice()), { displayName: 'Alice', monthlyIncome: 1500 }, { merge: true }));
+    await assertFails(setDoc(profile(bob(), 'bob'), { displayName: 'Bob', monthlyIncome: -1 }));
+  });
+});
+
 describe('Firestore security rules: manual transactions', () => {
   const txn = (db, id = 'm1', user = 'alice') => doc(db, `users/${user}/transactions/${id}`);
   // A valid manual transaction owned by alice
