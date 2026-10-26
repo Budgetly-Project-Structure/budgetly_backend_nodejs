@@ -52,6 +52,39 @@ service cloud.firestore {
                 || (d.monthlyIncome is number && d.monthlyIncome >= 0 && d.monthlyIncome <= 10000000));
     }
 
+    // Soft delete and restore (data-framework.md). Instead of removing a document,
+    // the app sets three fields; the server removes it for good after purgeAfter.
+    // In the same write only these three (and updatedAt) may change.
+    function onlyDeleteFieldsChange() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['deletedAt','deletedBy','purgeAfter','updatedAt']);
+    }
+
+    // True if the existing document isn't deleted (deletedAt missing or null)
+    function isActive() {
+      return resource.data.get('deletedAt', null) == null;
+    }
+
+    // Soft delete: an active doc gets deletedAt = now (serverTimestamp()),
+    // deletedBy = the caller, and a purgeAfter later than now.
+    function isSoftDelete() {
+      return isActive()
+        && onlyDeleteFieldsChange()
+        && request.resource.data.deletedAt == request.time
+        && request.resource.data.deletedBy == request.auth.uid
+        && request.resource.data.purgeAfter is timestamp
+        && request.resource.data.purgeAfter > request.time;
+    }
+
+    // Restore: a deleted doc has all three fields cleared back to null.
+    function isRestore() {
+      return !isActive()
+        && onlyDeleteFieldsChange()
+        && request.resource.data.deletedAt == null
+        && request.resource.data.deletedBy == null
+        && request.resource.data.purgeAfter == null;
+    }
+
     // The user's profile document (created at signup by src/lib/auth.js). It also
     // holds their settings: monthlyIncome (SCRUM-84), used for the budget in a month
     // where no money came in.
@@ -101,15 +134,20 @@ service cloud.firestore {
 
       // Budgets (SCRUM-81): a monthly limit per category, one doc per category with the
       // category id as the doc id. Unlike transactions, the user owns these and may
-      // create, change and delete them, but only with this exact shape.
+      // create and change them, but only with this exact shape.
       match /budgets/{categoryId} {
         allow read: if isOwner(uid);
+        // Setting a limit. A soft-deleted budget must be restored first, so saving
+        // a limit can't quietly undo a delete.
         allow create, update: if isOwner(uid)
+          && (resource == null || isActive())
           && request.resource.data.keys().hasOnly(['categoryId','limit','updatedAt'])
           && request.resource.data.categoryId == categoryId
           && request.resource.data.limit is number
           && request.resource.data.limit >= 0;
-        allow delete: if isOwner(uid);
+        // Removing a budget is a soft delete (or a restore), never a real delete
+        allow update: if isOwner(uid) && (isSoftDelete() || isRestore());
+        allow delete: if false;
       }
 
       // Import status is written by the server; the client only reads it.
@@ -159,10 +197,11 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys()
              .hasOnly(['date','merchant','amount','category','accountId','updatedAt'])
         && isManualTxnShape(request.auth.uid, request.resource.data);
-      // Soft delete or restore: only the 3 delete fields (and updatedAt) change
+      // Soft delete or restore, manual transactions only. Imported ones are
+      // deleted together with their statement, by the server.
       allow update: if isTxnOwner()
-        && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['deletedAt','deletedBy','purgeAfter','updatedAt']);
+        && resource.data.get('source', '') == 'manual'
+        && (isSoftDelete() || isRestore());
 
       // Never deleted from the app. Deleting is a soft delete (above); the server
       // removes the doc for good after purgeAfter.

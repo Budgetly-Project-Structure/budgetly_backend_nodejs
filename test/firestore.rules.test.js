@@ -13,7 +13,7 @@
  * and unauthenticatedContext() is someone not logged in.
  */
 const { initializeTestEnvironment, assertFails, assertSucceeds } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, setDoc, updateDoc, deleteDoc, Timestamp } = require('firebase/firestore');
+const { doc, getDoc, setDoc, updateDoc, deleteDoc, Timestamp, serverTimestamp } = require('firebase/firestore');
 const fs = require('fs');
 
 // The test environment: an emulator connection that loads our real rules file
@@ -74,11 +74,11 @@ describe('Firestore security rules: budgets', () => {
   it('owner can create a budget', () =>
     assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 })));
 
-  it('owner can read, change and delete their budget', async () => {
+  it('owner can read and change their budget, but not hard delete it', async () => {
     await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 }));
     await assertSucceeds(getDoc(budget(alice())));
     await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 300 }));
-    await assertSucceeds(deleteDoc(budget(alice())));
+    await assertFails(deleteDoc(budget(alice()))); // soft delete only (see below)
   });
 
   it('other user cannot read or write it', async () => {
@@ -210,5 +210,126 @@ describe('Firestore security rules: manual transactions', () => {
   it('imported transactions still cannot be edited (except category) or deleted', async () => {
     await assertFails(updateDoc(txn(alice(), 't1'), { merchant: 'Changed' }));
     await assertFails(deleteDoc(txn(alice(), 't1')));
+  });
+});
+
+// Soft delete (data-framework.md): the app never removes a manual transaction or a
+// budget. It sets deletedAt (now), deletedBy (the caller) and purgeAfter together,
+// and restoring clears all three. The server removes it for good after purgeAfter.
+describe('Firestore security rules: soft delete', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  // The three fields a soft delete sets, as the app sends them
+  const softDelete = (by = 'alice') => ({
+    deletedAt: serverTimestamp(),
+    deletedBy: by,
+    purgeAfter: Timestamp.fromMillis(Date.now() + 30 * DAY),
+  });
+  const restore = { deletedAt: null, deletedBy: null, purgeAfter: null };
+  // Already soft deleted (seeded past the rules)
+  const deletedFields = () => ({
+    deletedAt: Timestamp.fromMillis(Date.now() - DAY),
+    deletedBy: 'alice',
+    purgeAfter: Timestamp.fromMillis(Date.now() + 29 * DAY),
+  });
+
+  const txn = (db, id = 'm1') => doc(db, `transactions/${id}`);
+  const manualTxn = (extra = {}) => ({
+    userId: 'alice',
+    date: Timestamp.fromDate(new Date('2026-10-15T12:00:00Z')),
+    merchant: 'Farmers market',
+    amount: -23.5,
+    category: 'groceries',
+    categorySource: 'user',
+    source: 'manual',
+    deletedAt: null,
+    ...extra,
+  });
+  const budget = (db, user = 'alice') => doc(db, `users/${user}/budgets/dining`);
+  const seed = (path, data) =>
+    env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), path), data));
+
+  describe('manual transactions (transactions/)', () => {
+    it('hard delete is denied', async () => {
+      await seed('transactions/m1', manualTxn());
+      await assertFails(deleteDoc(txn(alice())));
+    });
+
+    it('owner can soft delete', async () => {
+      await seed('transactions/m1', manualTxn());
+      await assertSucceeds(updateDoc(txn(alice()), softDelete()));
+    });
+
+    it('deletedBy set to someone else is denied', async () => {
+      await seed('transactions/m1', manualTxn());
+      await assertFails(updateDoc(txn(alice()), softDelete('bob')));
+    });
+
+    it("cannot soft delete another user's transaction", async () => {
+      await seed('transactions/m1', manualTxn());
+      await assertFails(updateDoc(txn(bob()), softDelete('bob')));
+    });
+
+    it('changing other fields in the same write is denied', async () => {
+      await seed('transactions/m1', manualTxn());
+      await assertFails(updateDoc(txn(alice()), { ...softDelete(), amount: -1 }));
+    });
+
+    it('a soft delete must set all three fields, with a later purgeAfter', async () => {
+      await seed('transactions/m1', manualTxn());
+      await assertFails(updateDoc(txn(alice()), { deletedAt: serverTimestamp(), deletedBy: 'alice' }));
+      await assertFails(updateDoc(txn(alice()), { ...softDelete(), purgeAfter: Timestamp.fromMillis(Date.now() - DAY) }));
+    });
+
+    it('imported transactions cannot be soft deleted from the app', async () => {
+      await seed('transactions/i1', manualTxn({ source: 'import' }));
+      await assertFails(updateDoc(txn(alice(), 'i1'), softDelete()));
+    });
+
+    it('owner can restore a deleted one (all three cleared)', async () => {
+      await seed('transactions/m1', manualTxn(deletedFields()));
+      await assertSucceeds(updateDoc(txn(alice()), restore));
+    });
+
+    it('restore must clear all three fields', async () => {
+      await seed('transactions/m1', manualTxn(deletedFields()));
+      await assertFails(updateDoc(txn(alice()), { deletedAt: null }));
+    });
+  });
+
+  describe('budgets', () => {
+    it('hard delete is denied', async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await assertFails(deleteDoc(budget(alice())));
+    });
+
+    it('owner can soft delete', async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await assertSucceeds(updateDoc(budget(alice()), softDelete()));
+    });
+
+    it('deletedBy set to someone else is denied', async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await assertFails(updateDoc(budget(alice()), softDelete('bob')));
+    });
+
+    it("cannot soft delete another user's budget", async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await assertFails(updateDoc(doc(bob(), 'users/alice/budgets/dining'), softDelete('bob')));
+    });
+
+    it('changing other fields in the same write is denied', async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await assertFails(updateDoc(budget(alice()), { ...softDelete(), limit: 0 }));
+    });
+
+    it('owner can restore a deleted one', async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250, ...deletedFields() });
+      await assertSucceeds(updateDoc(budget(alice()), restore));
+    });
+
+    it('saving a limit cannot undo a delete; restore first', async () => {
+      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250, ...deletedFields() });
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 300 }));
+    });
   });
 });
