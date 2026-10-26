@@ -4,6 +4,8 @@ rules_version = '2';
 //
 // Who can read and write what in the Firestore database.
 // Every user's data lives under users/{uid}, and only that user can read it.
+// Transactions are moving to a top-level collection, owned by their userId field
+// (SCRUM-113, block at the bottom).
 // The server (Cloud Functions using the Admin SDK) skips these rules entirely,
 // which is how it writes transactions and import records that users can't.
 //
@@ -24,7 +26,13 @@ service cloud.firestore {
       return d.keys().hasOnly(['userId','date','merchant','amount','category','categorySource',
                                'categoryConfidence','isUserCorrected','accountId',
                                'sourceStatementId','source','createdAt','updatedAt'])
-        && d.keys().hasAll(['userId','date','merchant','amount','category','source'])
+        && isManualTxnShape(uid, d);
+    }
+
+    // The same checks without the list of allowed fields, so the top-level
+    // transactions block (SCRUM-113) can also allow the soft-delete fields.
+    function isManualTxnShape(uid, d) {
+      return d.keys().hasAll(['userId','date','merchant','amount','category','source'])
         && d.userId == uid
         && d.source == 'manual'
         && d.date is timestamp
@@ -62,6 +70,9 @@ service cloud.firestore {
       // No one can delete their profile from the app
       allow delete: if false;
 
+      // OLD location. The app still reads and writes here until the move to the
+      // top-level transactions collection (SCRUM-116/117). Remove this block after that.
+      //
       // Imported transactions are created only by Cloud Functions (Admin SDK bypasses
       // rules), and for those the user may only re-categorize. Manual transactions
       // (SCRUM-86, source == 'manual') are the user's own: they can add, edit and
@@ -106,6 +117,56 @@ service cloud.firestore {
         allow read: if isOwner(uid);
         allow write: if false;
       }
+    }
+
+    // Transactions (SCRUM-113): one top-level collection for everyone. The owner is
+    // the userId field, not the path, so every rule compares it with the uid from
+    // the signed-in user's verified token (request.auth.uid). Schema:
+    // budgetly_contracts/schemas/data-model.md.
+    match /transactions/{transactionId} {
+      // True if someone is logged in AND the existing doc's userId is them
+      function isTxnOwner() {
+        return request.auth != null && resource.data.userId == request.auth.uid;
+      }
+
+      // Read one doc or run a query. Rules aren't filters: a query must include
+      // where("userId", "==", <own uid>) or Firestore rejects the whole query.
+      allow read: if isTxnOwner();
+
+      // Adding a manual transaction. Imported ones are written by Cloud Functions
+      // (Admin SDK bypasses rules). userId must be the caller's own uid, and new
+      // docs start out not deleted (deletedAt == null).
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['userId','date','merchant','amount','category','categorySource',
+                                                  'categoryConfidence','isUserCorrected','accountId',
+                                                  'sourceStatementId','source','createdAt','updatedAt',
+                                                  'deletedAt','deletedBy','purgeAfter'])
+        && isManualTxnShape(request.auth.uid, request.resource.data)
+        && 'deletedAt' in request.resource.data
+        && request.resource.data.deletedAt == null;
+
+      // Changes by the owner. userId, source and sourceStatementId are never in
+      // the allowed lists below, so they can't change.
+      // Re-categorizing (any transaction): only the category fields
+      allow update: if isTxnOwner()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['category','categorySource','updatedAt'])
+        && request.resource.data.category is string
+        && request.resource.data.categorySource == 'user';
+      // Editing a manual transaction (imported ones can't have their amount, date... changed)
+      allow update: if isTxnOwner()
+        && resource.data.get('source', '') == 'manual'
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['date','merchant','amount','category','accountId','updatedAt'])
+        && isManualTxnShape(request.auth.uid, request.resource.data);
+      // Soft delete or restore: only the 3 delete fields (and updatedAt) change
+      allow update: if isTxnOwner()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['deletedAt','deletedBy','purgeAfter','updatedAt']);
+
+      // Never deleted from the app. Deleting is a soft delete (above); the server
+      // removes the doc for good after purgeAfter.
+      allow delete: if false;
     }
     // Anything not matched above is denied by default.
   }
