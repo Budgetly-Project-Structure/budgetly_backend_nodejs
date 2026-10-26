@@ -26,6 +26,7 @@ const logger = require("firebase-functions/logger");
 
 const { createClaudeClassifier } = require("./lib/aiClient");
 const { runCategorization } = require("./lib/categorizeJob");
+const { requireUid } = require("./lib/callables");
 
 // The Claude API key (SCRUM-70). Only functions that list it in `secrets` can read it.
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
@@ -33,8 +34,8 @@ const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 exports.categorizeTransactions = onCall(
   { secrets: [anthropicApiKey], timeoutSeconds: 300, memory: "512MiB" },
   async (request) => {
-    const uid = request.auth?.uid;
-    if (!uid) throw new HttpsError("unauthenticated", "Please sign in again.");
+    // From the verified login token only, never request.data (SCRUM-112)
+    const uid = requireUid(request);
     const importId = request.data?.importId ?? null;
     if (importId !== null && (typeof importId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(importId))) {
       throw new HttpsError("invalid-argument", "That statement ID isn't valid.");

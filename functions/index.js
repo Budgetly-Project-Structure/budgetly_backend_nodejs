@@ -45,7 +45,7 @@ const { onObjectFinalized } = require("firebase-functions/v2/storage");
 // Trigger that fires when a Firestore document is created, changed or deleted
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 // Callable functions: the web app calls these directly with httpsCallable()
-const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { onCall } = require("firebase-functions/v2/https");
 // Admin SDK: server-side access to Firestore and Storage (bypasses security rules)
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
@@ -55,7 +55,7 @@ const logger = require("firebase-functions/logger");
 
 const { createStore } = require("./lib/firestoreStore");
 const { processImport } = require("./lib/importPipeline");
-const { deleteImport, DeleteImportError } = require("./lib/deleteImport");
+const { createDeleteImportHandler } = require("./lib/callables");
 const { createImportCategorizer } = require("./lib/importCategorization");
 const { createMerchantCache, cacheUpdateFor } = require("./lib/merchantCache");
 
@@ -164,26 +164,16 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
 
 /**
  * deleteImport({ importId }) -> { deletedTransactions }
- * Only the signed-in owner can delete an import. User-facing problems (not
- * found, still importing...) come back as HttpsErrors with a readable message.
+ * Only the signed-in owner can delete an import. The uid comes only from the
+ * login token, never the body (SCRUM-112, lib/callables.js). User-facing problems
+ * (not found, still importing...) come back as HttpsErrors with a readable message.
  */
-exports.deleteImport = onCall(async (request) => {
-  const uid = request.auth?.uid ?? null;
-  try {
-    return await deleteImport({
-      uid,
-      importId: request.data?.importId,
-      openStore: (importId) => createStore({ db, uid, importId }),
-      // Uploads go to the project's default bucket (web app src/lib/uploads.js)
-      deleteFile: (path) => getStorage().bucket().file(path).delete({ ignoreNotFound: true }),
-      logger,
-    });
-  } catch (err) {
-    if (err instanceof DeleteImportError) throw new HttpsError(err.code, err.message);
-    logger.error("Delete import failed", { uid, importId: request.data?.importId, message: err.message });
-    throw new HttpsError("internal", "We couldn't delete this statement. Please try again.");
-  }
-});
+exports.deleteImport = onCall(createDeleteImportHandler({
+  openStoreFor: (uid, importId) => createStore({ db, uid, importId }),
+  // Uploads go to the project's default bucket (web app src/lib/uploads.js)
+  deleteFile: (path) => getStorage().bucket().file(path).delete({ ignoreNotFound: true }),
+  logger,
+}));
 
 /**
  * Remembers the user's category choices per merchant (SCRUM-75).
