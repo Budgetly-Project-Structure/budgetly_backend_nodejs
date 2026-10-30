@@ -180,16 +180,19 @@ function fakeFirestore(docs) {
   });
   const collection = (p) => ({
     doc: (id) => ref(`${p}/${id}`),
-    where: (field, op, value) => ({
-      limit: (n) => ({
-        get: async () => {
-          const found = [...data.entries()]
-            .filter(([k, v]) => k.startsWith(`${p}/`) && v[field] === value)
-            .slice(0, n)
-            .map(([k]) => ({ ref: ref(k) }));
-          return { empty: found.length === 0, size: found.length, docs: found };
-        },
-      }),
+    where: (field, op, value) => query(p, [[field, value]]),
+  });
+  // where() can be chained (userId, then sourceStatementId), like the real Firestore
+  const query = (p, filters) => ({
+    where: (field, op, value) => query(p, [...filters, [field, value]]),
+    limit: (n) => ({
+      get: async () => {
+        const found = [...data.entries()]
+          .filter(([k, v]) => k.startsWith(`${p}/`) && filters.every(([f, val]) => v[f] === val))
+          .slice(0, n)
+          .map(([k]) => ({ ref: ref(k) }));
+        return { empty: found.length === 0, size: found.length, docs: found };
+      },
     }),
   });
   const db = {
@@ -203,10 +206,12 @@ function fakeFirestore(docs) {
 }
 
 describe("firestoreStore: delete methods", () => {
-  test("get / deleteTransactionBatch / deleteImportDoc work on users/{uid}", async () => {
+  test("get / deleteImportDoc work on users/{uid}; deleteTransactionBatch works on the top-level transactions", async () => {
     const docs = { "users/alice/imports/imp1": { status: "completed" } };
-    for (let i = 0; i < 450; i++) docs[`users/alice/transactions/imp1_${i}`] = { sourceStatementId: "imp1" };
-    docs["users/alice/transactions/other_1"] = { sourceStatementId: "imp2" };
+    for (let i = 0; i < 450; i++) docs[`transactions/alice_imp1_${i}`] = { userId: "alice", sourceStatementId: "imp1" };
+    docs["transactions/alice_other_1"] = { userId: "alice", sourceStatementId: "imp2" };
+    // another user's transaction with the same sourceStatementId must survive
+    docs["transactions/bob_imp1_1"] = { userId: "bob", sourceStatementId: "imp1" };
     const { db, data } = fakeFirestore(docs);
     const store = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: () => "now" });
 
@@ -217,6 +222,6 @@ describe("firestoreStore: delete methods", () => {
     await store.deleteImportDoc();
 
     assert.equal(await store.get(), null);
-    assert.deepEqual([...data.keys()], ["users/alice/transactions/other_1"]);
+    assert.deepEqual([...data.keys()].sort(), ["transactions/alice_other_1", "transactions/bob_imp1_1"]);
   });
 });

@@ -7,7 +7,7 @@
  * Document shape follows budgetly_contracts/schemas/data-model.md and the
  * mock data the web app is built against (src/data/mockData.js):
  *
- *   users/{uid}/transactions/{id}
+ *   transactions/{uid}_{importId}_{rowNumber}   (top-level collection, SCRUM-111)
  *     userId            owner (the contracts say every doc carries this)
  *     date              Firestore Timestamp (a JS Date here; the Admin SDK converts it)
  *     merchant          raw merchant text from the statement
@@ -21,6 +21,10 @@
  *     isUserCorrected   false
  *     accountId         which account the statement belongs to, or null
  *     sourceStatementId the import doc this transaction came from (the "statementId")
+ *     source            "import" (manual transactions are added by the web app)
+ *     deletedAt         null; the web app sets it to soft delete (rules: SCRUM-113)
+ *     deletedBy         null
+ *     purgeAfter        null
  *     createdAt         added by the writer (server timestamp)
  */
 "use strict";
@@ -37,13 +41,14 @@ function dateToNoonUtc(isoDate) {
 }
 
 /**
- * Deterministic document ID: importId + the row's line number in the file.
- * If the same import is ever processed twice (Cloud Functions can deliver an
- * event more than once), the second run overwrites the same documents
- * instead of creating duplicates.
+ * Deterministic document ID: uid + importId + the row's line number in the file.
+ * Transactions now share one top-level collection, so the uid is part of the ID
+ * (two users can never collide). If the same import is ever processed twice
+ * (Cloud Functions can deliver an event more than once), the second run
+ * overwrites the same documents instead of creating duplicates.
  */
-function transactionId(importId, rowNumber) {
-  return `${importId}_${String(rowNumber).padStart(5, "0")}`;
+function transactionId(uid, importId, rowNumber) {
+  return `${uid}_${importId}_${String(rowNumber).padStart(5, "0")}`;
 }
 
 /**
@@ -55,7 +60,7 @@ function transactionId(importId, rowNumber) {
  */
 function toTransactionDocs(parsed, { uid, importId, accountId = null, accountType = null }) {
   return parsed.map((t) => ({
-    id: transactionId(importId, t.rowNumber),
+    id: transactionId(uid, importId, t.rowNumber),
     userId: uid,
     date: dateToNoonUtc(t.date),
     merchant: t.merchant,
@@ -64,6 +69,10 @@ function toTransactionDocs(parsed, { uid, importId, accountId = null, accountTyp
     isUserCorrected: false,
     accountId: accountId || null,
     sourceStatementId: importId,
+    source: "import",
+    deletedAt: null,
+    deletedBy: null,
+    purgeAfter: null,
   }));
 }
 
