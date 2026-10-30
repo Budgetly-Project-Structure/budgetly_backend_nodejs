@@ -43,7 +43,7 @@ async function runCategorization({
   logger = console,
   serverTimestamp = defaultServerTimestamp,
 }) {
-  let q = db.collection("users").doc(uid).collection("transactions").where("categorySource", "==", "none");
+  let q = db.collection("transactions").where("userId", "==", uid).where("categorySource", "==", "none");
   if (importId) q = q.where("sourceStatementId", "==", importId);
   const snap = await q.limit(limit).get();
   if (snap.empty) return { checked: 0, categorized: 0, leftUncategorized: 0, more: false };

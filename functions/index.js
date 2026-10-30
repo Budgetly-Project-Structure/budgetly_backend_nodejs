@@ -6,7 +6,7 @@
  * If it's a bank statement (CSV or PDF) in a user's imports folder, it:
  *   1. creates an Import record in Firestore (status "uploaded"),
  *   2. downloads the file and parses it,
- *   3. saves the transactions to users/{uid}/transactions,
+ *   3. saves the transactions to the top-level transactions collection,
  *   4. marks the import "completed" or "failed" so the app can show the result.
  *
  * The parsing and saving logic lives in lib/ (csvParser.js, transactions.js,
@@ -35,7 +35,7 @@
  *
  * Storage path:   users/{uid}/imports/{fileName}
  * Firestore docs: users/{uid}/imports/{importId}
- *                 users/{uid}/transactions/{importId}_{rowNumber}
+ *                 transactions/{uid}_{importId}_{rowNumber}
  */
 
 // --- Imports ---------------------------------------------------------------
@@ -180,9 +180,13 @@ exports.deleteImport = onCall(createDeleteImportHandler({
  * Fires on every transaction write; cacheUpdateFor() decides whether a user just
  * chose a category. Failing here only means the next import won't use that choice.
  */
-exports.onTransactionCategoryChanged = onDocumentWritten("users/{uid}/transactions/{txnId}", async (event) => {
-  const { uid } = event.params;
-  const update = cacheUpdateFor(event.data?.before?.data() ?? null, event.data?.after?.data() ?? null);
+exports.onTransactionCategoryChanged = onDocumentWritten("transactions/{txnId}", async (event) => {
+  const before = event.data?.before?.data() ?? null;
+  const after = event.data?.after?.data() ?? null;
+  // The owner is the transaction's userId (transactions are no longer under users/{uid})
+  const uid = after?.userId ?? before?.userId;
+  if (!uid) return;
+  const update = cacheUpdateFor(before, after);
   if (!update) return;
   try {
     await createMerchantCache({ db, uid }).save(update.merchant, update.category);

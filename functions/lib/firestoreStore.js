@@ -8,6 +8,10 @@
  *   update(patch)              merge fields into users/{uid}/imports/{importId}
  *   writeTransactions(docs)    save transactions in batches
  *   deleteTransactions()       remove everything this import wrote (cleanup after a failure)
+ *
+ * Transactions live in the top-level `transactions` collection (SCRUM-111). Every
+ * query here filters by userId as well as sourceStatementId, so one user's import
+ * can never touch another user's transactions.
  *   get()                      the import doc's data, or null if it doesn't exist
  *   deleteTransactionBatch()   delete up to DELETE_BATCH_SIZE of its transactions, returns how many
  *   deleteImportDoc()          delete the import doc itself
@@ -35,7 +39,9 @@ function defaultServerTimestamp() {
 function createStore({ db, uid, importId, serverTimestamp = defaultServerTimestamp }) {
   const userRef = db.collection("users").doc(uid);
   const importRef = userRef.collection("imports").doc(importId);
-  const txnCol = userRef.collection("transactions");
+  const txnCol = db.collection("transactions");
+  // This import's transactions: always scoped to the owner
+  const importTxns = () => txnCol.where("userId", "==", uid).where("sourceStatementId", "==", importId);
 
   return {
     async update(patch) {
@@ -55,10 +61,7 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
 
     async deleteTransactions() {
       for (;;) {
-        const snap = await txnCol
-          .where("sourceStatementId", "==", importId)
-          .limit(BATCH_SIZE)
-          .get();
+        const snap = await importTxns().limit(BATCH_SIZE).get();
         if (snap.empty) return;
         const batch = db.batch();
         snap.docs.forEach((d) => batch.delete(d.ref));
@@ -72,10 +75,7 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
     },
 
     async deleteTransactionBatch() {
-      const snap = await txnCol
-        .where("sourceStatementId", "==", importId)
-        .limit(DELETE_BATCH_SIZE)
-        .get();
+      const snap = await importTxns().limit(DELETE_BATCH_SIZE).get();
       if (snap.empty) return 0;
       const batch = db.batch();
       snap.docs.forEach((d) => batch.delete(d.ref));

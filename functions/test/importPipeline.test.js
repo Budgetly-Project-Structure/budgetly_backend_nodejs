@@ -29,7 +29,7 @@ describe("toTransactionDocs", () => {
 
   test("matches the shape in the data model", () => {
     assert.deepEqual(docs[1], {
-      id: "imp123_00003",
+      id: "alice_imp123_00003",
       userId: "alice",
       date: new Date("2026-09-02T12:00:00Z"),
       merchant: "Starbucks",
@@ -41,13 +41,22 @@ describe("toTransactionDocs", () => {
       isUserCorrected: false,
       accountId: "acct-checking",
       sourceStatementId: "imp123",
+      source: "import",
+      deletedAt: null,
+      deletedBy: null,
+      purgeAfter: null,
     });
   });
 
   test("document IDs are deterministic, so a re-run overwrites instead of duplicating", () => {
     const again = toTransactionDocs(parsed, { uid: "alice", importId: "imp123" });
     assert.deepEqual(again.map((d) => d.id), docs.map((d) => d.id));
-    assert.equal(transactionId("imp123", 42), "imp123_00042");
+    assert.equal(transactionId("alice", "imp123", 42), "alice_imp123_00042");
+  });
+
+  test("the user id is part of the document ID, so two users never collide in the shared collection", () => {
+    const bob = toTransactionDocs(parsed, { uid: "bob", importId: "imp123" });
+    assert.ok(bob.every((d, i) => d.id !== docs[i].id));
   });
 
   test("missing account becomes null, not undefined (Firestore rejects undefined)", () => {
@@ -59,7 +68,7 @@ describe("toTransactionDocs", () => {
 // ---------------------------------------------------------------------------
 /** Minimal in-memory stand-in for the parts of Firestore the store uses. */
 function fakeFirestore() {
-  const data = new Map(); // "users/alice/transactions/x" -> doc data
+  const data = new Map(); // "transactions/alice_imp1_00002" -> doc data
   const commits = [];
   const ref = (p) => ({
     path: p,
@@ -68,16 +77,19 @@ function fakeFirestore() {
   });
   const collection = (p) => ({
     doc: (id) => ref(`${p}/${id}`),
-    where: (field, op, value) => ({
-      limit: (n) => ({
-        get: async () => {
-          const docs = [...data.entries()]
-            .filter(([k, v]) => k.startsWith(`${p}/`) && v[field] === value)
-            .slice(0, n)
-            .map(([k]) => ({ ref: ref(k) }));
-          return { empty: docs.length === 0, docs };
-        },
-      }),
+    where: (field, op, value) => query(p, [[field, value]]),
+  });
+  // where() can be chained (userId, then sourceStatementId), like the real Firestore
+  const query = (p, filters) => ({
+    where: (field, op, value) => query(p, [...filters, [field, value]]),
+    limit: (n) => ({
+      get: async () => {
+        const docs = [...data.entries()]
+          .filter(([k, v]) => k.startsWith(`${p}/`) && filters.every(([f, val]) => v[f] === val))
+          .slice(0, n)
+          .map(([k]) => ({ ref: ref(k) }));
+        return { empty: docs.length === 0, size: docs.length, docs };
+      },
     }),
   });
   return {
@@ -106,12 +118,15 @@ describe("firestoreStore", () => {
       { uid: "alice", importId }
     );
 
-  test("writes under users/{uid}/transactions with createdAt and without the id field", async () => {
+  test("writes to the top-level transactions collection with createdAt and without the id field", async () => {
     const db = fakeFirestore();
     const store = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
     await store.writeTransactions(makeDocs(2));
-    const saved = db.data.get("users/alice/transactions/imp1_00002");
+    const saved = db.data.get("transactions/alice_imp1_00002");
     assert.equal(saved.merchant, "M0");
+    assert.equal(saved.userId, "alice");
+    assert.equal(saved.source, "import");
+    assert.equal(saved.deletedAt, null);
     assert.equal(saved.createdAt, "SERVER_TS");
     assert.equal("id" in saved, false);
   });
@@ -142,6 +157,20 @@ describe("firestoreStore", () => {
     await a.deleteTransactions();
     assert.equal(db.data.size, 3);
     assert.ok([...db.data.keys()].every((k) => k.includes("imp2_")));
+  });
+
+  test("deleteTransactions and deleteTransactionBatch never touch another user's transactions", async () => {
+    const db = fakeFirestore();
+    const alice = createStore({ db, uid: "alice", importId: "imp1", serverTimestamp: stamp });
+    const bob = createStore({ db, uid: "bob", importId: "imp1", serverTimestamp: stamp }); // same importId on purpose
+    await alice.writeTransactions(makeDocs(4, "imp1"));
+    await bob.writeTransactions(
+      toTransactionDocs([{ date: "2026-09-01", merchant: "BOBS", amount: -1, rowNumber: 2 }], { uid: "bob", importId: "imp1" })
+    );
+    assert.equal(db.data.size, 5);
+    assert.equal(await alice.deleteTransactionBatch(), 4);
+    await alice.deleteTransactions();
+    assert.deepEqual([...db.data.keys()], ["transactions/bob_imp1_00002"]);
   });
 
   test("update() merges into users/{uid}/imports/{importId} and stamps updatedAt", async () => {

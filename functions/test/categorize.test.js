@@ -213,7 +213,7 @@ describe("categorizeTransactions (SCRUM-71)", () => {
 });
 
 // ---------------------------------------------------------------------------
-/** Tiny Firestore fake with what categorizeJob uses: two where()s, limit(), get(), bulkWriter(). */
+/** Tiny Firestore fake with what categorizeJob uses: chained where()s, limit(), get(), bulkWriter(). */
 function fakeFirestore(docs, { changedSinceRead = [] } = {}) {
   const data = new Map(Object.entries(docs)); // path -> doc data
   const writes = [];
@@ -229,9 +229,8 @@ function fakeFirestore(docs, { changedSinceRead = [] } = {}) {
     },
   });
   const db = {
-    collection: (c) => ({
-      doc: (uid) => ({ collection: (sub) => query(`${c}/${uid}/${sub}/`, [], Infinity) }),
-    }),
+    // transactions is one top-level collection; each doc has a userId field
+    collection: (c) => query(`${c}/`, [], Infinity),
     bulkWriter: () => {
       let onError = () => false;
       const pending = [];
@@ -263,11 +262,11 @@ describe("runCategorization (SCRUM-71)", () => {
   const setup = (overrides = {}) =>
     fakeFirestore(
       {
-        "users/alice/transactions/a": { ...base, categorySource: "none", category: "uncategorized", sourceStatementId: "imp1" },
-        "users/alice/transactions/b": { ...base, merchant: "PAYMENT THANK YOU", amount: 500, categorySource: "rule", category: "transfers", sourceStatementId: "imp1" },
-        "users/alice/transactions/c": { ...base, merchant: "ALDI", categorySource: "user", category: "groceries", sourceStatementId: "imp1" },
-        "users/alice/transactions/d": { ...base, merchant: "TARGET", categorySource: "none", category: "uncategorized", sourceStatementId: "imp2" },
-        "users/bob/transactions/e": { ...base, categorySource: "none", category: "uncategorized", sourceStatementId: "imp1" },
+        "transactions/alice_a": { ...base, userId: "alice", categorySource: "none", category: "uncategorized", sourceStatementId: "imp1" },
+        "transactions/alice_b": { ...base, userId: "alice", merchant: "PAYMENT THANK YOU", amount: 500, categorySource: "rule", category: "transfers", sourceStatementId: "imp1" },
+        "transactions/alice_c": { ...base, userId: "alice", merchant: "ALDI", categorySource: "user", category: "groceries", sourceStatementId: "imp1" },
+        "transactions/alice_d": { ...base, userId: "alice", merchant: "TARGET", categorySource: "none", category: "uncategorized", sourceStatementId: "imp2" },
+        "transactions/bob_e": { ...base, userId: "bob", categorySource: "none", category: "uncategorized", sourceStatementId: "imp1" },
       },
       overrides
     );
@@ -286,20 +285,20 @@ describe("runCategorization (SCRUM-71)", () => {
     const result = await run(db);
 
     assert.deepEqual(result, { checked: 2, categorized: 2, leftUncategorized: 0, more: false });
-    assert.deepEqual(writes.map((w) => w.path).sort(), ["users/alice/transactions/a", "users/alice/transactions/d"]);
-    assert.deepEqual(writes.find((w) => w.path.endsWith("/a")).patch, {
+    assert.deepEqual(writes.map((w) => w.path).sort(), ["transactions/alice_a", "transactions/alice_d"]);
+    assert.deepEqual(writes.find((w) => w.path.endsWith("_a")).patch, {
       category: "dining",
       categoryConfidence: 0.97,
       categorySource: "ai",
       updatedAt: "now",
     });
-    assert.equal(data.get("users/alice/transactions/b").category, "transfers");
-    assert.equal(data.get("users/alice/transactions/c").category, "groceries");
-    assert.equal(data.get("users/bob/transactions/e").category, "uncategorized");
+    assert.equal(data.get("transactions/alice_b").category, "transfers");
+    assert.equal(data.get("transactions/alice_c").category, "groceries");
+    assert.equal(data.get("transactions/bob_e").category, "uncategorized");
   });
 
   test("each save only goes through if the transaction hasn't changed since it was read", async () => {
-    const { db, writes } = setup({ changedSinceRead: ["users/alice/transactions/a"] });
+    const { db, writes } = setup({ changedSinceRead: ["transactions/alice_a"] });
     const result = await run(db);
     assert.equal(result.categorized, 1);
     assert.equal(result.leftUncategorized, 1);
@@ -309,7 +308,7 @@ describe("runCategorization (SCRUM-71)", () => {
   test("importId limits it to one statement", async () => {
     const { db, writes } = setup();
     await run(db, { importId: "imp2" });
-    assert.deepEqual(writes.map((w) => w.path), ["users/alice/transactions/d"]);
+    assert.deepEqual(writes.map((w) => w.path), ["transactions/alice_d"]);
   });
 
   test("answers that fall back are not written, and an outage doesn't ask for another round", async () => {
