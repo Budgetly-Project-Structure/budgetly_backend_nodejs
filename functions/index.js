@@ -29,6 +29,11 @@
  * When a user sets or edits a transaction's category, remember it for that merchant
  * (users/{uid}/merchantCache, lib/merchantCache.js) so the next import reuses it.
  *
+ * purgeDeleted (SCRUM-127)
+ * Runs every day. Permanently removes manual transactions and budgets the user deleted
+ * more than 30 days ago (their purgeAfter date has passed). Until then they sit in
+ * "Recently deleted" and can be restored (lib/purgeJob.js).
+ *
  * categorizeTransactions (Claude, paid) is switched off: it lives in
  * aiFunctions.js, which this file doesn't load, so deploys stay free. See that
  * file for how to turn it on.
@@ -44,6 +49,8 @@ const crypto = require("node:crypto");
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
 // Trigger that fires when a Firestore document is created, changed or deleted
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+// Trigger that runs on a schedule (Cloud Scheduler)
+const { onSchedule } = require("firebase-functions/v2/scheduler");
 // Callable functions: the web app calls these directly with httpsCallable()
 const { onCall } = require("firebase-functions/v2/https");
 // Admin SDK: server-side access to Firestore and Storage (bypasses security rules)
@@ -58,6 +65,7 @@ const { processImport } = require("./lib/importPipeline");
 const { createDeleteImportHandler } = require("./lib/callables");
 const { createImportCategorizer } = require("./lib/importCategorization");
 const { createMerchantCache, cacheUpdateFor } = require("./lib/merchantCache");
+const { runPurge } = require("./lib/purgeJob");
 
 // --- Setup -----------------------------------------------------------------
 // Runs once when the function starts, not on every upload
@@ -194,3 +202,16 @@ exports.onTransactionCategoryChanged = onDocumentWritten("transactions/{txnId}",
     logger.error("Could not update merchant cache", { uid, message: err.message });
   }
 });
+
+/**
+ * Permanently removes soft-deleted transactions and budgets whose 30 days are up
+ * (SCRUM-127). The app can only soft delete (the rules block real deletes), so this
+ * is the only place data is really removed. Runs daily at 3 AM Central.
+ */
+exports.purgeDeleted = onSchedule(
+  { schedule: "every day 03:00", timeZone: "America/Chicago", timeoutSeconds: 540 },
+  async () => {
+    const result = await runPurge({ db, logger });
+    logger.info("purgeDeleted done", result);
+  }
+);
