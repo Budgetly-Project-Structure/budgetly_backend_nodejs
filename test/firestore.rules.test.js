@@ -13,7 +13,7 @@
  * and unauthenticatedContext() is someone not logged in.
  */
 const { initializeTestEnvironment, assertFails, assertSucceeds } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, setDoc, updateDoc, deleteDoc, Timestamp, serverTimestamp } = require('firebase/firestore');
+const { doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, Timestamp, serverTimestamp } = require('firebase/firestore');
 const fs = require('fs');
 
 // The test environment: an emulator connection that loads our real rules file
@@ -330,6 +330,189 @@ describe('Firestore security rules: soft delete', () => {
     it('saving a limit cannot undo a delete; restore first', async () => {
       await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250, ...deletedFields() });
       await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 300 }));
+    });
+  });
+});
+
+// SCRUM-114: ownership and impersonation on the top-level transactions collection.
+// The owner is the userId field, not the path, so these tests try the attacks that
+// matter: reading or querying someone else's data, creating or taking over a document
+// with someone else's userId, and reassigning a document to another user.
+// request.auth.uid comes from the verified login token, which the browser (or a tool
+// like Postman) cannot forge, so a request can only ever act as the user who signed in.
+describe('Firestore security rules: ownership and impersonation (SCRUM-114)', () => {
+  const unauth = () => env.unauthenticatedContext().firestore();
+  const txn = (db, id) => doc(db, `transactions/${id}`);
+  const manual = (extra = {}) => ({
+    userId: 'alice',
+    date: Timestamp.fromDate(new Date('2026-10-15T12:00:00Z')),
+    merchant: 'Farmers market',
+    amount: -23.5,
+    category: 'groceries',
+    categorySource: 'user',
+    categoryConfidence: 1,
+    isUserCorrected: true,
+    accountId: null,
+    sourceStatementId: null,
+    source: 'manual',
+    deletedAt: null,
+    deletedBy: null,
+    purgeAfter: null,
+    ...extra,
+  });
+  // An imported transaction, as the import Cloud Function writes it
+  const imported = (extra = {}) => ({
+    userId: 'alice',
+    date: Timestamp.fromDate(new Date('2026-09-05T12:00:00Z')),
+    merchant: 'Venmo Cashout',
+    amount: 40,
+    category: 'uncategorized',
+    categorySource: 'none',
+    categoryConfidence: null,
+    isUserCorrected: false,
+    accountId: null,
+    sourceStatementId: 'imp1',
+    source: 'import',
+    deletedAt: null,
+    deletedBy: null,
+    purgeAfter: null,
+    ...extra,
+  });
+
+  // Alice has one manual and one imported transaction; bob has one manual (all seeded past the rules)
+  beforeEach(() =>
+    env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(txn(db, 'a-manual'), manual());
+      await setDoc(txn(db, 'a-import'), imported());
+      await setDoc(txn(db, 'b-manual'), manual({ userId: 'bob', merchant: 'Bobs lunch' }));
+    }));
+
+  describe('reading', () => {
+    it('owner can read their own transaction', () =>
+      assertSucceeds(getDoc(txn(alice(), 'a-manual'))));
+
+    it("another user cannot read it, even by guessing the document ID", () =>
+      assertFails(getDoc(txn(bob(), 'a-manual'))));
+
+    it('an unauthenticated user cannot read it', () =>
+      assertFails(getDoc(txn(unauth(), 'a-manual'))));
+
+    it('a query limited to your own userId works, and returns only your documents', async () => {
+      const snap = await assertSucceeds(getDocs(query(collection(alice(), 'transactions'), where('userId', '==', 'alice'))));
+      if (snap.size !== 2) throw new Error(`expected alice's 2 transactions, got ${snap.size}`);
+    });
+
+    it('the app query (own userId and not deleted) works', () =>
+      assertSucceeds(getDocs(query(collection(alice(), 'transactions'),
+        where('userId', '==', 'alice'), where('deletedAt', '==', null)))));
+
+    it("a query for someone else's userId is rejected", () =>
+      assertFails(getDocs(query(collection(bob(), 'transactions'), where('userId', '==', 'alice')))));
+
+    it('a query with no userId filter is rejected (rules are not filters)', () =>
+      assertFails(getDocs(collection(alice(), 'transactions'))));
+
+    it('an unauthenticated query is rejected', () =>
+      assertFails(getDocs(query(collection(unauth(), 'transactions'), where('userId', '==', 'alice')))));
+  });
+
+  describe('creating (impersonation)', () => {
+    it('owner can create a manual transaction with their own userId', () =>
+      assertSucceeds(setDoc(txn(alice(), 'new1'), manual())));
+
+    it("cannot create one with someone else's userId", async () => {
+      await assertFails(setDoc(txn(bob(), 'new1'), manual({ userId: 'alice' })));
+      await assertFails(setDoc(txn(alice(), 'new2'), manual({ userId: 'bob' })));
+    });
+
+    it('cannot create one without a userId', () => {
+      const { userId, ...noUser } = manual();
+      return assertFails(setDoc(txn(alice(), 'new1'), noUser));
+    });
+
+    it('an unauthenticated user cannot create one', () =>
+      assertFails(setDoc(txn(unauth(), 'new1'), manual())));
+
+    it("cannot overwrite someone else's transaction by reusing its ID", async () => {
+      await assertFails(setDoc(txn(bob(), 'a-manual'), manual({ userId: 'bob' })));
+      await assertFails(setDoc(txn(bob(), 'a-import'), manual({ userId: 'bob' })));
+    });
+
+    it('cannot create an imported transaction from the app (only the server can)', () =>
+      assertFails(setDoc(txn(alice(), 'new1'), imported())));
+  });
+
+  describe('changing and taking over', () => {
+    it("the owner cannot reassign their own transaction to another user", async () => {
+      await assertFails(updateDoc(txn(alice(), 'a-manual'), { userId: 'bob' }));
+      await assertFails(updateDoc(txn(alice(), 'a-import'), { userId: 'bob' }));
+    });
+
+    it("another user cannot take over a transaction by setting userId to themselves", async () => {
+      await assertFails(updateDoc(txn(bob(), 'a-manual'), { userId: 'bob' }));
+      await assertFails(updateDoc(txn(bob(), 'a-import'), { userId: 'bob' }));
+    });
+
+    it("another user cannot edit or recategorize someone else's transaction", async () => {
+      await assertFails(updateDoc(txn(bob(), 'a-manual'), { merchant: 'Hacked', updatedAt: serverTimestamp() }));
+      await assertFails(updateDoc(txn(bob(), 'a-import'),
+        { category: 'dining', categorySource: 'user', updatedAt: serverTimestamp() }));
+    });
+
+    it('the owner can still recategorize their own imported transaction', () =>
+      assertSucceeds(updateDoc(txn(alice(), 'a-import'),
+        { category: 'income', categorySource: 'user', updatedAt: serverTimestamp() })));
+
+    it('an unauthenticated user cannot change or delete anything', async () => {
+      await assertFails(updateDoc(txn(unauth(), 'a-manual'), { merchant: 'Hacked' }));
+      await assertFails(updateDoc(txn(unauth(), 'a-import'), { category: 'dining', categorySource: 'user' }));
+      await assertFails(deleteDoc(txn(unauth(), 'a-manual')));
+    });
+
+    it('source and sourceStatementId can never be changed, so a transaction cannot change type', async () => {
+      await assertFails(updateDoc(txn(alice(), 'a-import'), { source: 'manual' }));
+      await assertFails(updateDoc(txn(alice(), 'a-manual'), { source: 'import' }));
+      await assertFails(updateDoc(txn(alice(), 'a-import'), { sourceStatementId: 'imp2' }));
+    });
+
+    it("no one can hard delete a transaction, their own or someone else's", async () => {
+      await assertFails(deleteDoc(txn(alice(), 'a-manual')));
+      await assertFails(deleteDoc(txn(bob(), 'a-manual')));
+      await assertFails(deleteDoc(txn(alice(), 'a-import')));
+    });
+  });
+
+  describe('other collections', () => {
+    const importDoc = (db, user = 'alice') => doc(db, `users/${user}/imports/imp1`);
+    const cacheDoc = (db, user = 'alice') => doc(db, `users/${user}/merchantCache/venmo-cashout`);
+    beforeEach(() =>
+      env.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(importDoc(ctx.firestore()), { status: 'completed', fileType: 'csv' });
+        await setDoc(cacheDoc(ctx.firestore()), { merchantKey: 'VENMO CASHOUT', category: 'income', categoryConfidence: 1 });
+      }));
+
+    it('only the owner can read an import record, and no one can write one', async () => {
+      await assertSucceeds(getDoc(importDoc(alice())));
+      await assertFails(getDoc(importDoc(bob(), 'alice')));
+      await assertFails(getDoc(importDoc(unauth(), 'alice')));
+      await assertFails(setDoc(importDoc(alice()), { status: 'completed' }));
+      await assertFails(updateDoc(importDoc(alice()), { status: 'failed' }));
+    });
+
+    it('the merchant cache is server only: no one can read or write it from the app', async () => {
+      await assertFails(getDoc(cacheDoc(alice())));
+      await assertFails(setDoc(cacheDoc(alice()), { merchantKey: 'VENMO CASHOUT', category: 'dining', categoryConfidence: 1 }));
+      await assertFails(setDoc(cacheDoc(bob(), 'alice'), { merchantKey: 'VENMO CASHOUT', category: 'dining', categoryConfidence: 1 }));
+      await assertFails(getDoc(cacheDoc(unauth(), 'alice')));
+    });
+
+    it("another user cannot read or change someone else's profile", async () => {
+      await env.withSecurityRulesDisabled((ctx) =>
+        setDoc(doc(ctx.firestore(), 'users/alice'), { email: 'alice@example.com', displayName: 'Alice', createdAt: Timestamp.now() }));
+      await assertFails(getDoc(doc(bob(), 'users/alice')));
+      await assertFails(updateDoc(doc(bob(), 'users/alice'), { displayName: 'Hacked' }));
+      await assertFails(updateDoc(doc(bob(), 'users/alice'), { monthlyIncome: 1 }));
     });
   });
 });
