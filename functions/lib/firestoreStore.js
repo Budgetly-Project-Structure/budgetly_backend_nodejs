@@ -17,6 +17,8 @@
  *   deleteImportDoc()          delete the import doc itself
  *   softDeleteTransactionBatch(fields) / softDeleteImportDoc(fields)
  *                              mark them deleted instead (SCRUM-120)
+ *   restoreTransactionBatch(fields) / restoreImportDoc()
+ *                              undo that (SCRUM-121)
  *   existingTransactionCounts({accountId})  what earlier imports already saved, to skip duplicates (SCRUM-136)
  */
 "use strict";
@@ -110,6 +112,26 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
     /** Marks the import doc itself as deleted (SCRUM-120). */
     async softDeleteImportDoc({ deletedBy, purgeAfter }) {
       await importRef.update({ deletedAt: serverTimestamp(), deletedBy, purgeAfter, updatedAt: serverTimestamp() });
+    },
+
+    /**
+     * Restore (SCRUM-121): clears the delete fields on up to DELETE_BATCH_SIZE of
+     * this import's transactions that `deletedBy` deleted, returns how many.
+     * Restored ones have deletedBy null, so the loop ends. Equality filters only.
+     */
+    async restoreTransactionBatch({ deletedBy }) {
+      const snap = await importTxns().where("deletedBy", "==", deletedBy).limit(DELETE_BATCH_SIZE).get();
+      if (snap.empty) return 0;
+      const batch = db.batch();
+      const fields = { deletedAt: null, deletedBy: null, purgeAfter: null, updatedAt: serverTimestamp() };
+      snap.docs.forEach((d) => batch.update(d.ref, fields));
+      await batch.commit();
+      return snap.size;
+    },
+
+    /** Clears the delete fields on the import doc (SCRUM-121). */
+    async restoreImportDoc() {
+      await importRef.update({ deletedAt: null, deletedBy: null, purgeAfter: null, updatedAt: serverTimestamp() });
     },
 
     /**

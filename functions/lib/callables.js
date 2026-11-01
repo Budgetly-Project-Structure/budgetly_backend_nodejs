@@ -16,6 +16,7 @@
 const { HttpsError } = require("firebase-functions/v2/https");
 const { deleteImport, DeleteImportError } = require("./deleteImport");
 const { softDeleteImport } = require("./softDeleteImport");
+const { restoreImport } = require("./restoreImport");
 
 /**
  * Returns the signed-in caller's uid from the verified token.
@@ -79,6 +80,23 @@ function createSoftDeleteImportHandler({ openStoreFor, writeAudit, logger = cons
   };
 }
 
+/**
+ * Builds the restoreImport({ importId }) callable handler (SCRUM-121): undoes
+ * softDeleteImport while the statement is still within its 30 days.
+ * Same rule as the others: only `importId` is read from the body.
+ */
+function createRestoreImportHandler({ openStoreFor, writeAudit, logger = console }) {
+  return async (request) => {
+    const uid = requireUid(request);
+    const importId = request.data?.importId;
+    try {
+      return await restoreImport({ uid, importId, openStore: (id) => openStoreFor(uid, id), writeAudit, logger });
+    } catch (err) {
+      throw toHttpsError(err, { uid, importId, logger });
+    }
+  };
+}
+
 /** A DeleteImportError keeps its code and message; anything else becomes "internal". */
 function toHttpsError(err, { uid, importId, logger }) {
   if (err instanceof DeleteImportError) return new HttpsError(err.code, err.message);
@@ -86,4 +104,4 @@ function toHttpsError(err, { uid, importId, logger }) {
   return new HttpsError("internal", "We couldn't update this statement. Please try again.");
 }
 
-module.exports = { requireUid, createDeleteImportHandler, createSoftDeleteImportHandler };
+module.exports = { requireUid, createDeleteImportHandler, createSoftDeleteImportHandler, createRestoreImportHandler };

@@ -62,7 +62,7 @@ const logger = require("firebase-functions/logger");
 
 const { createStore } = require("./lib/firestoreStore");
 const { processImport } = require("./lib/importPipeline");
-const { createDeleteImportHandler, createSoftDeleteImportHandler } = require("./lib/callables");
+const { createDeleteImportHandler, createSoftDeleteImportHandler, createRestoreImportHandler } = require("./lib/callables");
 const { createAuditWriter } = require("./lib/auditLog");
 const { createImportCategorizer } = require("./lib/importCategorization");
 const { createMerchantCache, cacheUpdateFor } = require("./lib/merchantCache");
@@ -191,6 +191,18 @@ exports.deleteImport = onCall(createDeleteImportHandler({
  * "import.deleted" audit entry. Owner only; the uid comes from the login token.
  */
 exports.softDeleteImport = onCall(createSoftDeleteImportHandler({
+  openStoreFor: (uid, importId) => createStore({ db, uid, importId }),
+  writeAudit: createAuditWriter({ db }),
+  logger,
+}));
+
+/**
+ * restoreImport({ importId }) -> { restoredTransactions }   (SCRUM-121)
+ * The Restore button in Recently deleted: clears the delete fields on the statement
+ * and its transactions and writes an "import.restored" audit entry. Only for the
+ * owner's own statement, while it's deleted and within its 30 days.
+ */
+exports.restoreImport = onCall(createRestoreImportHandler({
   openStoreFor: (uid, importId) => createStore({ db, uid, importId }),
   writeAudit: createAuditWriter({ db }),
   logger,
