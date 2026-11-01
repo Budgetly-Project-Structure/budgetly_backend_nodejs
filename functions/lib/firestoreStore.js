@@ -15,8 +15,11 @@
  *   get()                      the import doc's data, or null if it doesn't exist
  *   deleteTransactionBatch()   delete up to DELETE_BATCH_SIZE of its transactions, returns how many
  *   deleteImportDoc()          delete the import doc itself
+ *   existingTransactionCounts({accountId})  what earlier imports already saved, to skip duplicates (SCRUM-136)
  */
 "use strict";
+
+const { duplicateKey } = require("./duplicates");
 
 // Firestore allows 500 operations per batch; stay under it
 const BATCH_SIZE = 450;
@@ -85,6 +88,29 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
 
     async deleteImportDoc() {
       await importRef.delete();
+    },
+
+    /**
+     * What this user's other imports already saved for one account, as
+     * duplicateKey -> count (SCRUM-136). This import's own documents are left out, so
+     * running the same import twice still overwrites instead of skipping everything.
+     * Equality filters only, so no composite index is needed.
+     */
+    async existingTransactionCounts({ accountId = null } = {}) {
+      const snap = await txnCol
+        .where("userId", "==", uid)
+        .where("source", "==", "import")
+        .where("accountId", "==", accountId ?? null)
+        .select("date", "amount", "merchant", "accountId", "sourceStatementId")
+        .get();
+      const counts = new Map();
+      for (const d of snap.docs) {
+        const x = d.data();
+        if (x.sourceStatementId === importId || !x.date) continue;
+        const key = duplicateKey(x);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      return counts;
     },
   };
 }

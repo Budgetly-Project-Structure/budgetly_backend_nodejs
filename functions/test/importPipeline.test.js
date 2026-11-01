@@ -218,6 +218,7 @@ describe("processImport: happy path", () => {
       status: "completed",
       transactionCount: 36,
       skippedRowCount: 0,
+      duplicateRowCount: 0,
       rowErrors: [],
       error: null,
     });
