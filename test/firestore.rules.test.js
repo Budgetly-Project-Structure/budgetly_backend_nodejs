@@ -27,15 +27,15 @@ before(async () => {
   });
 });
 
-// Runs before every test: wipe the database, then add one transaction for alice.
-// withSecurityRulesDisabled acts like the server (Admin SDK), since users can't create transactions.
-beforeEach(async () => {
-  await env.clearFirestore();
-  await env.withSecurityRulesDisabled(async (ctx) => {
-    await setDoc(doc(ctx.firestore(), 'users/alice/transactions/t1'),
-      { amountCents: -450, merchant: 'Starbucks', category: 'Dining', categorySource: 'ai' });
-  });
-});
+// Runs before every test: wipe the database
+beforeEach(() => env.clearFirestore());
+
+// One imported transaction for alice. withSecurityRulesDisabled acts like the server
+// (Admin SDK), which writes imported transactions.
+const seedImported = () =>
+  env.withSecurityRulesDisabled((ctx) =>
+    setDoc(doc(ctx.firestore(), 'transactions/t1'),
+      { userId: 'alice', source: 'import', amount: -4.5, merchant: 'Starbucks', category: 'dining', categorySource: 'ai', deletedAt: null }));
 
 // Close the emulator connection when all tests are done
 after(() => env.cleanup());
@@ -45,27 +45,36 @@ const alice = () => env.authenticatedContext('alice').firestore();
 const bob = () => env.authenticatedContext('bob').firestore();
 
 describe('Firestore security rules: transactions', () => {
+  beforeEach(seedImported);
   // Reading: only the owner can see their transactions
   it('owner can read own transaction', () =>
-    assertSucceeds(getDoc(doc(alice(), 'users/alice/transactions/t1'))));
+    assertSucceeds(getDoc(doc(alice(), 'transactions/t1'))));
 
   it('other user cannot read it', () =>
-    assertFails(getDoc(doc(bob(), 'users/alice/transactions/t1'))));
+    assertFails(getDoc(doc(bob(), 'transactions/t1'))));
 
   it('unauthenticated user cannot read it', () =>
-    assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'users/alice/transactions/t1'))));
+    assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'transactions/t1'))));
 
   // Writing: transactions come from the import Cloud Function, never straight from the app
   it('owner cannot create transactions directly', () =>
-    assertFails(setDoc(doc(alice(), 'users/alice/transactions/t2'), { amountCents: 100 })));
+    assertFails(setDoc(doc(alice(), 'transactions/t2'), { userId: 'alice', source: 'import', amount: 100, deletedAt: null })));
 
   // The only change a user can make is the category (and it must be marked categorySource: 'user')
   it('owner can recategorize', () =>
-    assertSucceeds(updateDoc(doc(alice(), 'users/alice/transactions/t1'),
+    assertSucceeds(updateDoc(doc(alice(), 'transactions/t1'),
       { category: 'Coffee', categorySource: 'user' })));
 
   it('owner cannot change the amount', () =>
-    assertFails(updateDoc(doc(alice(), 'users/alice/transactions/t1'), { amountCents: 0 })));
+    assertFails(updateDoc(doc(alice(), 'transactions/t1'), { amount: 0 })));
+
+  // SCRUM-116: the old location is closed now that everything lives in transactions/
+  it('the old users/{uid}/transactions path is closed, even to the owner', async () => {
+    await env.withSecurityRulesDisabled((ctx) =>
+      setDoc(doc(ctx.firestore(), 'users/alice/transactions/old1'), { userId: 'alice', amount: -1 }));
+    await assertFails(getDoc(doc(alice(), 'users/alice/transactions/old1')));
+    await assertFails(setDoc(doc(alice(), 'users/alice/transactions/old2'), { userId: 'alice', amount: -1 }));
+  });
 });
 
 describe('Firestore security rules: budgets', () => {
@@ -153,7 +162,8 @@ describe('Firestore security rules: profile and settings (SCRUM-88)', () => {
 });
 
 describe('Firestore security rules: manual transactions', () => {
-  const txn = (db, id = 'm1', user = 'alice') => doc(db, `users/${user}/transactions/${id}`);
+  // (transactions/ since SCRUM-116; the old users/{uid}/transactions path is closed)
+  const txn = (db, id = 'm1') => doc(db, `transactions/${id}`);
   // A valid manual transaction owned by alice
   const manual = (extra = {}) => ({
     userId: 'alice',
@@ -167,6 +177,7 @@ describe('Firestore security rules: manual transactions', () => {
     accountId: null,
     sourceStatementId: null,
     source: 'manual',
+    deletedAt: null,
     ...extra,
   });
   // Puts a manual transaction in the database as alice, bypassing the rules
@@ -178,7 +189,7 @@ describe('Firestore security rules: manual transactions', () => {
 
   it('cannot add one for someone else, or marked as imported', async () => {
     await assertFails(setDoc(txn(alice()), manual({ userId: 'bob' })));
-    await assertFails(setDoc(txn(bob(), 'm1', 'alice'), manual()));
+    await assertFails(setDoc(txn(bob()), manual()));
     await assertFails(setDoc(txn(alice()), manual({ source: 'import' })));
   });
 
@@ -198,16 +209,17 @@ describe('Firestore security rules: manual transactions', () => {
 
   it('other user cannot edit or delete it', async () => {
     await seed();
-    await assertFails(updateDoc(txn(bob(), 'm1', 'alice'), { merchant: 'Hacked' }));
-    await assertFails(deleteDoc(txn(bob(), 'm1', 'alice')));
+    await assertFails(updateDoc(txn(bob()), { merchant: 'Hacked' }));
+    await assertFails(deleteDoc(txn(bob())));
   });
 
-  it('owner can delete a manual transaction', async () => {
+  it('owner cannot hard delete a manual transaction (soft delete only, below)', async () => {
     await seed();
-    await assertSucceeds(deleteDoc(txn(alice())));
+    await assertFails(deleteDoc(txn(alice())));
   });
 
   it('imported transactions still cannot be edited (except category) or deleted', async () => {
+    await seedImported();
     await assertFails(updateDoc(txn(alice(), 't1'), { merchant: 'Changed' }));
     await assertFails(deleteDoc(txn(alice(), 't1')));
   });
