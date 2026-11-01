@@ -528,3 +528,39 @@ describe('Firestore security rules: ownership and impersonation (SCRUM-114)', ()
     });
   });
 });
+
+// Audit log (SCRUM-120): only Cloud Functions write entries; the owner can read their own.
+describe('Firestore security rules: audit log', () => {
+  const entry = (userId) => ({ userId, action: 'import.deleted', targetPath: `users/${userId}/imports/imp1`, actor: userId, at: Timestamp.now(), details: {} });
+  const seed = () =>
+    env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'auditLog/a1'), entry('alice'));
+      await setDoc(doc(ctx.firestore(), 'auditLog/b1'), entry('bob'));
+    });
+
+  it('owner can read their own entry, and list their own entries', async () => {
+    await seed();
+    await assertSucceeds(getDoc(doc(alice(), 'auditLog/a1')));
+    const snap = await assertSucceeds(getDocs(query(collection(alice(), 'auditLog'), where('userId', '==', 'alice'))));
+    if (snap.size !== 1) throw new Error(`expected 1 entry, got ${snap.size}`);
+  });
+
+  it("other users and signed-out users cannot read it", async () => {
+    await seed();
+    await assertFails(getDoc(doc(bob(), 'auditLog/a1')));
+    await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), 'auditLog/a1')));
+    await assertFails(getDocs(query(collection(bob(), 'auditLog'), where('userId', '==', 'alice'))));
+  });
+
+  it('a list without a userId filter is rejected', async () => {
+    await seed();
+    await assertFails(getDocs(collection(alice(), 'auditLog')));
+  });
+
+  it('nobody can write, change or delete entries from the app, not even the owner', async () => {
+    await seed();
+    await assertFails(setDoc(doc(alice(), 'auditLog/a2'), entry('alice')));
+    await assertFails(updateDoc(doc(alice(), 'auditLog/a1'), { action: 'nothing.happened' }));
+    await assertFails(deleteDoc(doc(alice(), 'auditLog/a1')));
+  });
+});

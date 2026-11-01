@@ -84,4 +84,4 @@ async function deleteImport({ uid, importId, openStore, deleteFile, logger = con
   return { deletedTransactions };
 }
 
-module.exports = { deleteImport, DeleteImportError };
+module.exports = { deleteImport, DeleteImportError, IMPORT_ID };
