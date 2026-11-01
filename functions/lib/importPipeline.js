@@ -20,6 +20,11 @@
  * code runs after that, so the pipeline gives up on its own a bit earlier
  * (timeoutMs) and marks the import failed while it still can.
  *
+ * Duplicates (SCRUM-136): rows already saved by an earlier import of the same account
+ * (same date, amount and merchant) are skipped and counted in `duplicateRowCount`, so
+ * overlapping statements don't double the transactions. If every row is a duplicate the
+ * import is marked failed with a message saying so.
+ *
  * Categorizing (SCRUM-73): between parsing and saving, the optional `categorizer`
  * (importCategorization.js) gives the transactions their categories, for CSV and
  * PDF alike. If it throws anyway, the import is saved without those categories.
@@ -29,10 +34,12 @@
 const { parseStatementCsv, StatementParseError } = require("./csvParser");
 const { parseStatementPdf } = require("./pdfParser");
 const { toTransactionDocs } = require("./transactions");
+const { removeDuplicates } = require("./duplicates");
 
 const UNSUPPORTED_TYPE = "This file type isn't supported. Please upload a CSV or PDF statement.";
 const NOTHING_READABLE = "We couldn't read any transactions from this file.";
 const UNEXPECTED = "Something went wrong while importing this file. Please try again.";
+const ALL_DUPLICATES = "Every transaction in this file was already imported from another statement, so nothing new was added.";
 const TIMED_OUT = "This file took too long to import. Please try again, or split it into smaller files.";
 
 // The function's limit is 120 s (index.js). Stop well before it so there is time to record "failed".
@@ -54,7 +61,7 @@ const TIMEOUT = Symbol("timeout");
  * @param {Function} [opts.categorizer]  async (docs) => ({docs, summary}), from createImportCategorizer();
  *                                    without one, transactions are saved with just the free rules
  * @param {number} [opts.timeoutMs]  Give up and mark the import failed after this long
- * @returns {Promise<{status: "completed"|"failed", transactionCount: number, skippedRowCount: number, error?: string}>}
+ * @returns {Promise<{status: "completed"|"failed", transactionCount: number, skippedRowCount: number, duplicateRowCount?: number, error?: string}>}
  */
 async function runImport(
   { fileBuffer, fileType, uid, importId, accountId = null, accountType = null, store, logger = console, categorizer = null },
@@ -84,6 +91,23 @@ async function runImport(
     }
 
     let docs = toTransactionDocs(parsed.transactions, { uid, importId, accountId, accountType });
+
+    // Skip rows an earlier statement already saved. A failed check must not fail the
+    // import, so on an error everything is saved (and the problem is logged).
+    let duplicateRowCount = 0;
+    if (typeof store.existingTransactionCounts === "function") {
+      try {
+        const existing = await store.existingTransactionCounts({ accountId });
+        const split = removeDuplicates(docs, existing);
+        docs = split.fresh;
+        duplicateRowCount = split.duplicates.length;
+        if (duplicateRowCount > 0) logger.info("Skipped duplicates", { uid, importId, duplicateRowCount });
+      } catch (err) {
+        logger.warn("Could not check for duplicate transactions; importing everything", { uid, importId, message: err.message });
+      }
+    }
+    if (docs.length === 0) return await fail(ALL_DUPLICATES);
+
     if (categorizer) {
       // A bonus step: if it breaks, save the transactions without these categories
       try {
@@ -107,6 +131,7 @@ async function runImport(
       status: "completed",
       transactionCount: docs.length,
       skippedRowCount: parsed.errorCount,
+      duplicateRowCount,
     };
     await store.update({
       ...result,
@@ -183,4 +208,4 @@ async function processImport(opts) {
   return { status: "failed", transactionCount: 0, skippedRowCount: 0, error: TIMED_OUT };
 }
 
-module.exports = { processImport, purchasesLookPositive, UNSUPPORTED_TYPE, NOTHING_READABLE, UNEXPECTED, TIMED_OUT };
+module.exports = { processImport, purchasesLookPositive, UNSUPPORTED_TYPE, NOTHING_READABLE, ALL_DUPLICATES, UNEXPECTED, TIMED_OUT };
