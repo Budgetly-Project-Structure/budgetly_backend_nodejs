@@ -209,7 +209,7 @@ describe("createImportCategorizer (SCRUM-73)", () => {
     ["Starbucks", -6.45],
     ["NETFLIX", -15.49],
     ["MAPLE ST HAIR STUDIO #412", -45.03],
-    ["BARNES AND NOBLE", -22.16],
+    ["QUILL & THREAD CRAFTS", -22.16],
     ["ZXQ HARDWARE", -9.99],
   ];
 
@@ -220,7 +220,7 @@ describe("createImportCategorizer (SCRUM-73)", () => {
     assert.equal(docs[0].categorySource, "rule");
     assert.equal(docs[1].categorySource, "rule");
     const asked = calls.flatMap((c) => c.transactions.map((t) => t.merchant));
-    assert.deepEqual(asked.sort(), ["BARNES AND NOBLE", "MAPLE ST HAIR STUDIO #412", "ZXQ HARDWARE"].sort());
+    assert.deepEqual(asked.sort(), ["QUILL & THREAD CRAFTS", "MAPLE ST HAIR STUDIO #412", "ZXQ HARDWARE"].sort());
     assert.equal(summary.rule, 2);
     assert.equal(summary.ai, 3);
     assert.equal(summary.uncategorized, 0);
