@@ -370,7 +370,8 @@ function parseStatementCsv(input, options = {}) {
 
   for (const { line, cells } of dataRows) {
     const dateRaw = String(cells[cols.date] ?? "").trim();
-    const merchant = String(cells[cols.description] ?? "").replace(/\s+/g, " ").trim();
+    // Account and reference numbers are masked, like in PDFs (SCRUM-140): only the last 4 digits are kept
+    const merchant = maskAccountNumbers(String(cells[cols.description] ?? "").replace(/\s+/g, " ").trim());
 
     const date = parseDate(dateRaw);
     if (!date) {
@@ -405,9 +406,17 @@ function parseStatementCsv(input, options = {}) {
   };
 }
 
+/** Masks anything that looks like an account or card number: 8+ digits, possibly grouped with spaces or dashes. */
+function maskAccountNumbers(text) {
+  return String(text).replace(/(?<![\d/.,])\d(?:[ -]?\d){7,}(?![\d/])/g, (run) =>
+    /^\d{4}-\d{2}-\d{2}$/.test(run) ? run : `••••${run.replace(/\D/g, "").slice(-4)}` // leave ISO dates alone
+  );
+}
+
 module.exports = {
   parseStatementCsv,
   StatementParseError,
+  maskAccountNumbers, // also used by pdfParser.js
   // exported for unit tests
   parseDate,
   parseMoney,

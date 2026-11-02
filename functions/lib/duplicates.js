@@ -9,7 +9,10 @@
  * total would be wrong.
  *
  * Two transactions count as the same when they are on the same account and have the
- * same date, amount and merchant text. Real repeat purchases still work: if the
+ * same date, amount and merchant name. The name is compared by its words only: words
+ * with digits in them (phone numbers, masked account numbers like ••••6411, reference
+ * codes) and punctuation are left out, because the CSV and the PDF of the same
+ * statement print those differently (SCRUM-140). Real repeat purchases still work: if the
  * database already holds 2 coffees for $4.50 on a day and the new file lists 3, only
  * the third one is new.
  *
@@ -23,14 +26,37 @@ function isoDay(date) {
   return d.toISOString().slice(0, 10);
 }
 
+/** A word that one copy of a statement prints and another masks or leaves out. */
+function isVolatileWord(w) {
+  const digits = (w.match(/\d/g) ?? []).length;
+  return (
+    w.includes("•") || // a masked number: ••••6411
+    digits >= 6 || // phone numbers, account and ID numbers: 866-579-7172, 9100236411
+    (digits > 0 && /[A-Z]/.test(w) && w.length >= 8) // reference codes: JPM99A1B2C3
+  );
+}
+
 /**
- * The text two copies of the same transaction share: account, day, amount in cents
- * and the merchant (upper case, spaces collapsed).
+ * The merchant as two copies of the same transaction print it: upper case, without
+ * masked numbers, long numbers, reference codes or punctuation.
+ * "GOOGLE *FIBER 855-418-8326 CA" and "GOOGLE FIBER ••••8326 CA" both become
+ * "GOOGLE FIBER CA"; short store numbers stay ("STARBUCKS #1187" -> "STARBUCKS 1187").
+ * A name with nothing left is kept as it is.
  */
+function merchantWords(merchant) {
+  const text = String(merchant ?? "").replace(/\s+/g, " ").trim().toUpperCase();
+  const words = text
+    .split(" ")
+    .filter((w) => !isVolatileWord(w))
+    .map((w) => w.replace(/[^A-Z0-9]/g, "")) // drop punctuation: "*FIBER" -> "FIBER"
+    .filter(Boolean);
+  return words.length ? words.join(" ") : text;
+}
+
+/** The text two copies of the same transaction share: account, day, amount in cents and the merchant's words. */
 function duplicateKey({ accountId, date, amount, merchant }) {
   const cents = Math.round(Number(amount) * 100);
-  const name = String(merchant ?? "").replace(/\s+/g, " ").trim().toUpperCase();
-  return `${accountId ?? ""}|${isoDay(date)}|${cents}|${name}`;
+  return `${accountId ?? ""}|${isoDay(date)}|${cents}|${merchantWords(merchant)}`;
 }
 
 /**
@@ -56,4 +82,4 @@ function removeDuplicates(docs, existing) {
   return { fresh, duplicates };
 }
 
-module.exports = { duplicateKey, removeDuplicates, isoDay };
+module.exports = { duplicateKey, removeDuplicates, isoDay, merchantWords };

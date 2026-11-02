@@ -46,7 +46,7 @@
  */
 "use strict";
 
-const { StatementParseError, parseDate, parseMoney } = require("./csvParser");
+const { StatementParseError, parseDate, parseMoney, maskAccountNumbers } = require("./csvParser");
 
 // --- Limits ----------------------------------------------------------------
 const MAX_PAGES = 100; // a monthly statement is a handful of pages
@@ -241,13 +241,6 @@ function findAccountLast4(lines) {
     if (m) return m[1];
   }
   return null;
-}
-
-/** Masks anything that looks like an account or card number: 8+ digits, possibly grouped with spaces or dashes. */
-function maskAccountNumbers(text) {
-  return String(text).replace(/(?<![\d/.,])\d(?:[ -]?\d){7,}(?![\d/])/g, (run) =>
-    /^\d{4}-\d{2}-\d{2}$/.test(run) ? run : `••••${run.replace(/\D/g, "").slice(-4)}` // leave ISO dates alone
-  );
 }
 
 // --- Table header ----------------------------------------------------------
