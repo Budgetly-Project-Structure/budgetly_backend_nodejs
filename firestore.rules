@@ -106,14 +106,36 @@ service cloud.firestore {
         allow read: if isOwner(uid);
         // Setting a limit. A soft-deleted budget must be restored first, so saving
         // a limit can't quietly undo a delete.
+        // source (SCRUM-137) says who chose the limit: "auto" (Auto budget) or "user"
         allow create, update: if isOwner(uid)
           && (resource == null || isActive())
-          && request.resource.data.keys().hasOnly(['categoryId','limit','updatedAt'])
+          && request.resource.data.keys().hasOnly(['categoryId','limit','source','updatedAt'])
           && request.resource.data.categoryId == categoryId
           && request.resource.data.limit is number
-          && request.resource.data.limit >= 0;
+          && request.resource.data.limit >= 0
+          && (!('source' in request.resource.data) || request.resource.data.source in ['auto', 'user']);
         // Removing a budget is a soft delete (or a restore), never a real delete
         allow update: if isOwner(uid) && (isSoftDelete() || isRestore());
+        allow delete: if false;
+      }
+
+      // The budget sets itself once a month (SCRUM-137): one record per month,
+      // with the month as the doc id, saying it happened and the savings kept.
+      // It can only be created once (a second tab's create is refused), only the
+      // savings can change later, and it's never deleted from the app.
+      match /budgetMonths/{month} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && request.resource.data.keys().hasOnly(['month','auto','savings','createdAt'])
+          && request.resource.data.month == month
+          && month.matches('^[0-9]{4}-[0-9]{2}$')
+          && request.resource.data.auto is bool
+          && request.resource.data.savings is number
+          && request.resource.data.savings >= 0;
+        allow update: if isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['savings','updatedAt'])
+          && request.resource.data.savings is number
+          && request.resource.data.savings >= 0;
         allow delete: if false;
       }
 

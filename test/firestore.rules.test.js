@@ -564,3 +564,49 @@ describe('Firestore security rules: audit log', () => {
     await assertFails(deleteDoc(doc(alice(), 'auditLog/a1')));
   });
 });
+
+// The budget sets itself each month (SCRUM-137): budgets say who chose the limit, and
+// users/{uid}/budgetMonths/{YYYY-MM} records the month once.
+describe('Firestore security rules: monthly budget (SCRUM-137)', () => {
+  const budget = (db, user = 'alice') => doc(db, `users/${user}/budgets/dining`);
+  const marker = (db, user = 'alice', month = '2026-11') => doc(db, `users/${user}/budgetMonths/${month}`);
+  const record = (extra = {}) => ({ month: '2026-11', auto: true, savings: 200, createdAt: serverTimestamp(), ...extra });
+
+  it('a budget can say source "auto" or "user", nothing else', async () => {
+    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, source: 'auto' }));
+    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 300, source: 'user' }));
+    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 300, source: 'robot' }));
+  });
+
+  it('owner can record the month once, and read it', async () => {
+    await assertSucceeds(setDoc(marker(alice()), record()));
+    await assertSucceeds(getDoc(marker(alice())));
+  });
+
+  it('a second create for the same month (another tab) is refused', async () => {
+    await assertSucceeds(setDoc(marker(alice()), record()));
+    await assertFails(setDoc(marker(alice()), record({ savings: 0 })));
+  });
+
+  it('only the savings can change later; it is never deleted', async () => {
+    await assertSucceeds(setDoc(marker(alice()), record()));
+    await assertSucceeds(updateDoc(marker(alice()), { savings: 150, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(marker(alice()), { auto: false }));
+    await assertFails(updateDoc(marker(alice()), { savings: -5 }));
+    await assertFails(deleteDoc(marker(alice())));
+  });
+
+  it('the record must match its month and have the right shape', async () => {
+    await assertFails(setDoc(marker(alice()), record({ month: '2026-12' })));
+    await assertFails(setDoc(marker(alice(), 'alice', 'november'), record({ month: 'november' })));
+    await assertFails(setDoc(marker(alice()), record({ savings: -1 })));
+    await assertFails(setDoc(marker(alice()), record({ extra: 'x' })));
+  });
+
+  it('other users and signed-out users cannot read or write it', async () => {
+    await assertSucceeds(setDoc(marker(alice()), record()));
+    await assertFails(getDoc(marker(bob(), 'alice')));
+    await assertFails(setDoc(marker(bob(), 'alice', '2026-12'), record({ month: '2026-12' })));
+    await assertFails(getDoc(marker(env.unauthenticatedContext().firestore(), 'alice')));
+  });
+});
