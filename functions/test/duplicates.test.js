@@ -246,3 +246,30 @@ describe("processImport: overlapping statements (SCRUM-136)", () => {
     assert.equal(categorized.length, 2);
   });
 });
+
+// SCRUM-140 bug bash: the CSV and the PDF of the same statement print merchants
+// differently, so 11 of 39 rows were imported twice. These are real pairs from
+// test-data/chase_checking_oct_2026.csv and checking_statement_oct_2026.pdf.
+describe("duplicateKey: the CSV and the PDF of the same statement match", () => {
+  const day = new Date("2026-10-06T12:00:00Z");
+  const pairs = [
+    ["ACME CORP PAYROLL PPD ID: 9100236411", "ACME CORP PAYROLL PPD ID: ••••6411"],
+    ["ZELLE PAYMENT TO SPRINGFIELD PROPERTY MGMT JPM99A1B2C3", "ZELLE PAYMENT TO SPRINGFIELD PROPERTY MGMT"],
+    ["NETFLIX.COM 866-579-7172 CA", "NETFLIX.COM ••••7172 CA"],
+    ["GOOGLE *FIBER 855-418-8326 CA", "GOOGLE FIBER ••••8326 CA"],
+    ["LYFT *RIDE THU 9PM 855-865-9553 CA", "LYFT *RIDE THU 9PM ••••9553 CA"],
+    ["CHASE CREDIT CRD AUTOPAY PPD ID: 4760039224", "CHASE CREDIT CRD AUTOPAY PPD ID: ••••9224"],
+  ];
+  for (const [csv, pdf] of pairs) {
+    test(`"${csv}" = "${pdf}"`, () => {
+      const key = (merchant) => duplicateKey({ accountId: "acct-checking", date: day, amount: -70, merchant });
+      assert.equal(key(csv), key(pdf));
+    });
+  }
+
+  test("different merchants still don't match", () => {
+    const key = (merchant) => duplicateKey({ accountId: "acct-checking", date: day, amount: -70, merchant });
+    assert.notEqual(key("NETFLIX.COM 866-579-7172 CA"), key("SPOTIFY USA 877-778-1161 NY"));
+    assert.notEqual(key("STARBUCKS STORE 08812"), key("STARBUCKS STORE 09913"));
+  });
+});

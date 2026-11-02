@@ -266,3 +266,21 @@ describe("parseMoney", () => {
     test(`"${bad}" -> NaN`, () => assert.ok(Number.isNaN(parseMoney(bad))));
   }
 });
+
+// SCRUM-140 bug bash: CSV imports kept full account and ID numbers in merchant names,
+// while PDFs masked them. Both now keep only the last 4 digits.
+describe("account numbers in merchant names are masked", () => {
+  test("8+ digit numbers keep only their last 4 digits; dates, amounts and store numbers stay", () => {
+    const { transactions } = parseStatementCsv(
+      "Date,Description,Amount\n" +
+        "10/01/2026,ACME CORP PAYROLL PPD ID: 9100236411,1850.00\n" +
+        "10/03/2026,NETFLIX.COM 866-579-7172 CA,-15.49\n" +
+        "10/04/2026,STARBUCKS STORE 08812,-7.10\n"
+    );
+    assert.deepEqual(transactions.map((t) => t.merchant), [
+      "ACME CORP PAYROLL PPD ID: ••••6411",
+      "NETFLIX.COM ••••7172 CA",
+      "STARBUCKS STORE 08812",
+    ]);
+  });
+});
