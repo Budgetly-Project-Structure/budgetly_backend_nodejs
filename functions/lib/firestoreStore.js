@@ -145,12 +145,13 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
         .where("userId", "==", uid)
         .where("source", "==", "import")
         .where("accountId", "==", accountId ?? null)
-        .select("date", "amount", "merchant", "accountId", "sourceStatementId")
+        .select("date", "amount", "merchant", "accountId", "sourceStatementId", "deletedAt")
         .get();
       const counts = new Map();
       for (const d of snap.docs) {
         const x = d.data();
-        if (x.sourceStatementId === importId || !x.date) continue;
+        // A deleted statement (SCRUM-120) no longer counts, so its file can be imported again
+        if (x.sourceStatementId === importId || !x.date || x.deletedAt != null) continue;
         const key = duplicateKey(x);
         counts.set(key, (counts.get(key) ?? 0) + 1);
       }

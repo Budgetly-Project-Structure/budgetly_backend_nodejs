@@ -161,6 +161,13 @@ describe("firestoreStore.existingTransactionCounts", () => {
     assert.equal((await store.existingTransactionCounts({ accountId: "acct-checking" })).size, 0);
   });
 
+  test("transactions from a deleted statement don't count, so the file can be imported again", async () => {
+    const db = fakeFirestore([saved("a", { deletedAt: new Date() }), saved("b", { deletedAt: null })]);
+    const store = createStore({ db, uid: "alice", importId: "imp2", serverTimestamp: stamp });
+    const counts = await store.existingTransactionCounts({ accountId: "acct-checking" });
+    assert.equal([...counts.values()].reduce((a, b) => a + b, 0), 1);
+  });
+
   test("an import with no account only matches other imports with no account", async () => {
     const db = fakeFirestore([saved("a", { accountId: null }), saved("b")]);
     const store = createStore({ db, uid: "alice", importId: "imp2", serverTimestamp: stamp });
