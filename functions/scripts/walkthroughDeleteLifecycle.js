@@ -9,7 +9,8 @@
  *   3. it shows in Recently deleted
  *   4. Restore (restoreImport) -> back to normal, audit entry
  *   5. another user can't see it or restore it
- *   6. Delete again, let 30 days pass, run the daily purge -> what really goes away
+ *   6. Delete again, let 30 days pass, run the daily purge -> transactions, record and
+ *      file are gone for good, with an "import.purged" audit entry (SCRUM-122)
  *
  * It never touches the real project: everything runs on the "demo-budgetly"
  * emulators, which start empty and are thrown away afterwards.
@@ -173,19 +174,21 @@ async function main() {
     logger: { info() {}, warn() {}, error() {} },
   }).catch((e) => e);
   check(tooLate?.code === "failed-precondition", "restoring after 30 days is refused", tooLate?.message);
-  const purged = await runPurge({ db, now: later, logger: { info() {}, warn() {}, error() {} } });
-  check(purged.transactions === expected, `purge removed the ${expected} transactions`, JSON.stringify(purged));
+  // The same wiring as purgeDeleted in index.js
+  const quiet = { info() {}, warn() {}, error() {} };
+  const purgeDeps = { db, now: later, writeAudit: createAuditWriter({ db }), logger: quiet };
+  const purged = await runPurge({ ...purgeDeps, deleteFile: (filePath) => bucket.file(filePath).delete({ ignoreNotFound: true }) });
+  check(purged.transactions === expected && purged.imports === 1, `purge removed the ${expected} transactions and the statement`, JSON.stringify(purged));
   c = await txnCounts(alice.uid, importId);
   check(c.total === 0, "no transactions from that statement are left", `${c.total} left`);
-
-  // What the purge does NOT do yet (reported, not checked as pass/fail)
-  const impAfter = await db.doc(`users/${alice.uid}/imports/${importId}`).get();
-  const fileAfter = await fileExists(storagePath);
+  check(!(await db.doc(`users/${alice.uid}/imports/${importId}`).get()).exists, "the import record is gone");
+  check(!(await fileExists(storagePath)), "the statement file is gone from Storage");
   const auditAfter = await auditActions(alice.uid);
-  console.log("\n  Known gaps after the purge (SCRUM-122, not built yet):");
-  console.log(`    import record still there:     ${impAfter.exists ? "yes" : "no"}`);
-  console.log(`    statement file still in Storage: ${fileAfter ? "yes" : "no"}`);
-  console.log(`    audit entry for the purge:     ${auditAfter.some((a) => a.startsWith("import.purged")) ? "yes" : "no"}  (log: ${auditAfter.join(", ")})`);
+  check(auditAfter[auditAfter.length - 1] === `import.purged(${expected})`, "audit log ends with import.purged", auditAfter.join(", "));
+  const purgedEntry = (await db.collection("auditLog").where("userId", "==", alice.uid).where("action", "==", "import.purged").get()).docs[0];
+  check(purgedEntry?.get("actor") === "system", 'the purge entry\'s actor is "system"', purgedEntry?.get("actor"));
+  const again = await runPurge({ ...purgeDeps, deleteFile: async () => {} });
+  check(again.transactions === 0 && again.imports === 0, "running the purge again finds nothing left", JSON.stringify(again));
 
   console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}`);
   process.exitCode = failures === 0 ? 0 : 1;

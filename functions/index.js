@@ -230,13 +230,19 @@ exports.onTransactionCategoryChanged = onDocumentWritten("transactions/{txnId}",
 
 /**
  * Permanently removes soft-deleted transactions and budgets whose 30 days are up
- * (SCRUM-127). The app can only soft delete (the rules block real deletes), so this
- * is the only place data is really removed. Runs daily at 3 AM Central.
+ * (SCRUM-127), and deleted statements with their files (SCRUM-122, with an
+ * "import.purged" audit entry). The app can only soft delete (the rules block real
+ * deletes), so this is the only place data is really removed. Runs daily at 3 AM Central.
  */
 exports.purgeDeleted = onSchedule(
   { schedule: "every day 03:00", timeZone: "America/Chicago", timeoutSeconds: 540 },
   async () => {
-    const result = await runPurge({ db, logger });
+    const result = await runPurge({
+      db,
+      deleteFile: (path) => getStorage().bucket().file(path).delete({ ignoreNotFound: true }),
+      writeAudit: createAuditWriter({ db }),
+      logger,
+    });
     logger.info("purgeDeleted done", result);
   }
 );

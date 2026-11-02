@@ -131,7 +131,7 @@ describe("runPurge: what it removes", () => {
       "users/u2/budgets/groceries": { categoryId: "groceries", limit: 400, ...deleted() },
     });
     const result = await run(db);
-    assert.deepEqual(result, { transactions: 2, budgets: 2, skipped: 0 });
+    assert.deepEqual(result, { transactions: 2, budgets: 2, imports: 0, skipped: 0 });
     assert.equal(db.docs.size, 0);
   });
 
@@ -141,7 +141,7 @@ describe("runPurge: what it removes", () => {
       "users/u1/budgets/dining": { ...deleted({ deletedAt: daysFromNow(-29), purgeAfter: daysFromNow(1) }) },
     });
     const result = await run(db);
-    assert.deepEqual(result, { transactions: 0, budgets: 0, skipped: 0 });
+    assert.deepEqual(result, { transactions: 0, budgets: 0, imports: 0, skipped: 0 });
     assert.equal(db.docs.size, 2);
   });
 
@@ -158,7 +158,7 @@ describe("runPurge: what it removes", () => {
       "users/u1/merchantCache/starbucks": { merchantKey: "STARBUCKS", category: "dining" },
     });
     const result = await run(db);
-    assert.deepEqual(result, { transactions: 0, budgets: 0, skipped: 0 });
+    assert.deepEqual(result, { transactions: 0, budgets: 0, imports: 0, skipped: 0 });
     assert.equal(db.docs.size, 8);
   });
 
@@ -174,7 +174,7 @@ describe("runPurge: what it removes", () => {
 
   test("does nothing when there is nothing to remove", async () => {
     const db = fakeDb({});
-    assert.deepEqual(await run(db), { transactions: 0, budgets: 0, skipped: 0 });
+    assert.deepEqual(await run(db), { transactions: 0, budgets: 0, imports: 0, skipped: 0 });
   });
 
   test("a second run finds nothing left to remove", async () => {
@@ -197,7 +197,7 @@ describe("runPurge: safety", () => {
       return realBulkWriter.call(db);
     };
     const result = await run(db);
-    assert.deepEqual(result, { transactions: 1, budgets: 0, skipped: 1 });
+    assert.deepEqual(result, { transactions: 1, budgets: 0, imports: 0, skipped: 1 });
     assert.deepEqual([...db.docs.keys()], ["transactions/t1"]);
     assert.equal(db.docs.get("transactions/t1").data.deletedAt, null, "t1 is still restored");
   });
@@ -206,7 +206,7 @@ describe("runPurge: safety", () => {
     // purgeAfter has passed but deletedAt is missing: not something the app writes, so don't delete
     const db = fakeDb({ "transactions/odd": { userId: "u1", deletedAt: null, deletedBy: null, purgeAfter: daysFromNow(-3) } });
     const result = await run(db);
-    assert.deepEqual(result, { transactions: 0, budgets: 0, skipped: 1 });
+    assert.deepEqual(result, { transactions: 0, budgets: 0, imports: 0, skipped: 1 });
     assert.equal(db.docs.size, 1);
   });
 
