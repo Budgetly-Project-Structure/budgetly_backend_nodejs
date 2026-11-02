@@ -8,13 +8,15 @@
  * request.data (the body the browser sends, e.g. { userId: "someone-else" })
  * is never used to decide who the caller is.
  *
- * The deleteImport handler lives here (not in index.js) so it can be unit
- * tested with fakes, without Firebase.
+ * The handlers live here (not in index.js) so they can be unit tested with
+ * fakes, without Firebase.
  */
 "use strict";
 
 const { HttpsError } = require("firebase-functions/v2/https");
 const { deleteImport, DeleteImportError } = require("./deleteImport");
+const { softDeleteImport } = require("./softDeleteImport");
+const { restoreImport } = require("./restoreImport");
 
 /**
  * Returns the signed-in caller's uid from the verified token.
@@ -51,11 +53,55 @@ function createDeleteImportHandler({ openStoreFor, deleteFile, logger = console 
         logger,
       });
     } catch (err) {
-      if (err instanceof DeleteImportError) throw new HttpsError(err.code, err.message);
-      logger.error("Delete import failed", { uid, importId, message: err.message });
-      throw new HttpsError("internal", "We couldn't delete this statement. Please try again.");
+      throw toHttpsError(err, { uid, importId, logger });
     }
   };
 }
 
-module.exports = { requireUid, createDeleteImportHandler };
+/**
+ * Builds the softDeleteImport({ importId }) callable handler (SCRUM-120): the
+ * statement and its transactions are marked deleted and can be restored for 30 days.
+ * Same rule as deleteImport: only `importId` is read from the body.
+ *
+ * @param {Object} deps
+ * @param {(uid: string, importId: string) => Object} deps.openStoreFor
+ * @param {(entry: Object) => Promise<void>} deps.writeAudit  auditLog.js createAuditWriter()
+ * @param {Object} [deps.logger]
+ */
+function createSoftDeleteImportHandler({ openStoreFor, writeAudit, logger = console }) {
+  return async (request) => {
+    const uid = requireUid(request);
+    const importId = request.data?.importId;
+    try {
+      return await softDeleteImport({ uid, importId, openStore: (id) => openStoreFor(uid, id), writeAudit, logger });
+    } catch (err) {
+      throw toHttpsError(err, { uid, importId, logger });
+    }
+  };
+}
+
+/**
+ * Builds the restoreImport({ importId }) callable handler (SCRUM-121): undoes
+ * softDeleteImport while the statement is still within its 30 days.
+ * Same rule as the others: only `importId` is read from the body.
+ */
+function createRestoreImportHandler({ openStoreFor, writeAudit, logger = console }) {
+  return async (request) => {
+    const uid = requireUid(request);
+    const importId = request.data?.importId;
+    try {
+      return await restoreImport({ uid, importId, openStore: (id) => openStoreFor(uid, id), writeAudit, logger });
+    } catch (err) {
+      throw toHttpsError(err, { uid, importId, logger });
+    }
+  };
+}
+
+/** A DeleteImportError keeps its code and message; anything else becomes "internal". */
+function toHttpsError(err, { uid, importId, logger }) {
+  if (err instanceof DeleteImportError) return new HttpsError(err.code, err.message);
+  logger.error("Statement action failed", { uid, importId, message: err.message });
+  return new HttpsError("internal", "We couldn't update this statement. Please try again.");
+}
+
+module.exports = { requireUid, createDeleteImportHandler, createSoftDeleteImportHandler, createRestoreImportHandler };
