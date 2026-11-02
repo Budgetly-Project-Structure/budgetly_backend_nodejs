@@ -35,6 +35,7 @@ const { parseStatementCsv, StatementParseError } = require("./csvParser");
 const { parseStatementPdf } = require("./pdfParser");
 const { toTransactionDocs } = require("./transactions");
 const { removeDuplicates } = require("./duplicates");
+const { detectAccountType, ACCOUNT_ID_FOR_TYPE } = require("./accountType");
 
 const UNSUPPORTED_TYPE = "This file type isn't supported. Please upload a CSV or PDF statement.";
 const NOTHING_READABLE = "We couldn't read any transactions from this file.";
@@ -52,10 +53,11 @@ const TIMEOUT = Symbol("timeout");
  * @param {string} opts.fileType     "csv" or "pdf"
  * @param {string} opts.uid
  * @param {string} opts.importId
- * @param {string|null} [opts.accountId]
+ * @param {string|null} [opts.accountId]   The account the user picked, or null for "detect it"
  * @param {string|null} [opts.accountType]  "credit" or "checking": card statements may list
  *                                          purchases as positive numbers, and card payments
- *                                          are marked as transfers
+ *                                          are marked as transfers. Null = detect it from the
+ *                                          file (SCRUM-135); a type the user picked always wins
  * @param {Object} opts.store        From createStore()
  * @param {Object} [opts.logger]     firebase-functions logger (defaults to console)
  * @param {Function} [opts.categorizer]  async (docs) => ({docs, summary}), from createImportCategorizer();
@@ -64,7 +66,7 @@ const TIMEOUT = Symbol("timeout");
  * @returns {Promise<{status: "completed"|"failed", transactionCount: number, skippedRowCount: number, duplicateRowCount?: number, error?: string}>}
  */
 async function runImport(
-  { fileBuffer, fileType, uid, importId, accountId = null, accountType = null, store, logger = console, categorizer = null },
+  { fileBuffer, fileType, uid, importId, accountId: pickedAccountId = null, accountType: pickedType = null, store, logger = console, categorizer = null },
   state
 ) {
   const fail = async (message) => {
@@ -79,6 +81,14 @@ async function runImport(
 
     // Both parsers return the same shape, so everything below doesn't care which one ran
     let parsed = fileType === "pdf" ? await parseStatementPdf(fileBuffer) : parseStatementCsv(fileBuffer);
+
+    // Checking or credit card (SCRUM-135): what the user picked, or else what the file looks like.
+    // The import record keeps both, so the Import page can show what was detected.
+    const detected = detectAccountType(parsed);
+    const accountType = pickedType ?? detected.type;
+    const accountId = pickedAccountId ?? (accountType ? ACCOUNT_ID_FOR_TYPE[accountType] : null);
+    await store.update({ accountType, accountId, detectedAccountType: detected.type });
+    logger.info("Account type", { uid, importId, picked: pickedType, detected: detected.type, reasons: detected.reasons });
     // Many card exports list purchases as positive numbers. On a credit account with one
     // Amount column where most rows are positive, read it again with the signs flipped.
     if (fileType === "csv" && accountType === "credit" && purchasesLookPositive(parsed)) {

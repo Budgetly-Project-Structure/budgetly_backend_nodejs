@@ -307,6 +307,7 @@ function parseLines(lines) {
   let cols = null; // current table header, if one has been seen
   let prevBalance = null; // balance after the previous row, used to work out signs
   let layout = "unknown";
+  let hasBalance = false; // a Balance column or an opening balance: a bank account (accountType.js)
 
   const fail = (row, reason) => {
     errorCount++;
@@ -322,6 +323,7 @@ function parseLines(lines) {
     if (header) {
       cols = header;
       layout = header.debit || header.credit ? "debit-credit columns" : "amount column";
+      if (header.balance) hasBalance = true;
       return;
     }
 
@@ -330,6 +332,7 @@ function parseLines(lines) {
     if (/\b(beginning|opening|previous|starting)\s+balance\b/i.test(text)) {
       const money = words.filter((w) => MONEY_WORD.test(w.text)).pop();
       if (money) prevBalance = Math.abs(parseMoney(money.text));
+      hasBalance = true;
       return;
     }
 
@@ -443,7 +446,7 @@ function parseLines(lines) {
     errors,
     errorCount,
     totalRows,
-    meta: { source: "pdf", layout, accountLast4, periodStart: period?.start ?? null, periodEnd: period?.end ?? null },
+    meta: { source: "pdf", layout, accountLast4, hasBalance, periodStart: period?.start ?? null, periodEnd: period?.end ?? null },
   };
 }
 

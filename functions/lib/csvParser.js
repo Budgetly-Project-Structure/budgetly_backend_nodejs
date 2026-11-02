@@ -61,6 +61,8 @@ const ALIASES = {
   credit: ["credit", "credits", "deposit", "deposits", "moneyin", "paidin"],
   // Only used when amounts are unsigned (see resolveAmount)
   type: ["transactiontype", "type", "drcr", "debitcredit", "details"],
+  // Never read; a running balance column just tells us it's a bank account (accountType.js)
+  balance: ["runningbalance", "balance"],
 };
 
 /** "Posting Date" -> "postingdate" */
