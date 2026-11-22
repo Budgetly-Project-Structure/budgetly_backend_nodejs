@@ -21,6 +21,19 @@ service firebase.storage {
         && (request.resource.contentType == 'text/csv'
             || request.resource.contentType == 'application/pdf');
     }
+
+    // Archived statement files (Sprint 5 #11): after 30 days the daily job moves a
+    // deleted statement's file to archive/users/{uid}/imports/{fileName}. Only the
+    // server and admin scripts (Admin SDK) touch it; no user, not even the owner.
+    match /archive/{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Daily Firestore backups (Sprint 5 #15): backups/YYYY-MM-DD/. Admins only.
+    match /backups/{allPaths=**} {
+      allow read, write: if false;
+    }
+
     // Everything else is denied by default.
   }
 }

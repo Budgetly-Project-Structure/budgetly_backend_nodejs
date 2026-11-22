@@ -205,6 +205,27 @@ service cloud.firestore {
       allow read: if request.auth != null && resource.data.userId == request.auth.uid;
       allow write: if false;
     }
+
+    // Archive (Sprint 5 #11, budgetly_assets docs/data-framework.md): after 30 days, the
+    // daily job moves soft-deleted data out of the app into these top-level collections.
+    // Only the server and admin scripts (Admin SDK, which skips these rules) use them.
+    // No user may read or write them, not even the owner of the data: archived documents
+    // keep their userId, but the app never sees the archive. Written out explicitly
+    // (instead of relying on the default deny) so the intent is clear and tested.
+    //   archive_transactions/{transactionId}     a transaction, same ID
+    //   archive_imports/{uid}_{importId}          an import record
+    //   archive_budgets/{uid}_{categoryId}        a budget
+    // Each keeps all its fields plus userId, originalPath, archivedAt
+    // (and archivedFilePath for imports).
+    match /archive_transactions/{docId} {
+      allow read, write: if false;
+    }
+    match /archive_imports/{docId} {
+      allow read, write: if false;
+    }
+    match /archive_budgets/{docId} {
+      allow read, write: if false;
+    }
     // Anything not matched above is denied by default.
   }
 }
