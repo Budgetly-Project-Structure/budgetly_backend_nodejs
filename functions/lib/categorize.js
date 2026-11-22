@@ -18,6 +18,7 @@
 "use strict";
 
 const { AI_CATEGORIES, uncategorizedFields } = require("./categories");
+const { centsOf, centsToDollars } = require("./money");
 
 const BATCH_SIZE = 50;
 // Batches sent to the model at the same time
@@ -36,7 +37,7 @@ function toIsoDate(date) {
  * answer gets the Uncategorized fields.
  *
  * @param {Object} reply  What classify() returned
- * @param {{merchant: string, amount: number}[]} batch
+ * @param {{merchant: string, amountCents: number}[]} batch
  */
 function readReply(reply, batch) {
   const fallback = batch.map(() => uncategorizedFields());
@@ -57,7 +58,7 @@ function readReply(reply, batch) {
       r.confidence >= 0 &&
       r.confidence <= 1 &&
       // Income can only be money coming in; a spending category on money in is a refund
-      !(r.category === "income" && !(t.amount > 0));
+      !(r.category === "income" && !(centsOf(t) > 0));
     if (!ok) return fallback[i];
     return {
       category: r.category,
@@ -70,7 +71,9 @@ function readReply(reply, batch) {
 /**
  * Categorizes transactions with the AI model.
  *
- * @param {{merchant: string, amount: number, date: Date|string}[]} transactions
+ * @param {{merchant: string, amountCents: number, date: Date|string}[]} transactions
+ *        amountCents in integer cents (Sprint 5 #6). The model is shown dollars, since that's
+ *        how statements read; nothing it returns is an amount.
  * @param {Object} opts
  * @param {(request: Object) => Promise<Object>} opts.classify  Sends one batch to the model
  * @param {Object} [opts.logger]
@@ -109,7 +112,7 @@ async function categorizeTransactions(
       transactions: batch.map((t, i) => ({
         id: `t${i + 1}`,
         merchant: String(t.merchant ?? ""),
-        amount: t.amount,
+        amount: centsToDollars(centsOf(t)),
         date: toIsoDate(t.date),
       })),
     };

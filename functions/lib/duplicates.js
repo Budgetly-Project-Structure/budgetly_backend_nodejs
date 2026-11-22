@@ -20,6 +20,8 @@
  */
 "use strict";
 
+const { centsOf } = require("./money");
+
 /** "YYYY-MM-DD" for a JS Date or a Firestore Timestamp. */
 function isoDay(date) {
   const d = typeof date?.toDate === "function" ? date.toDate() : date;
@@ -53,10 +55,14 @@ function merchantWords(merchant) {
   return words.length ? words.join(" ") : text;
 }
 
-/** The text two copies of the same transaction share: account, day, amount in cents and the merchant's words. */
-function duplicateKey({ accountId, date, amount, merchant }) {
-  const cents = Math.round(Number(amount) * 100);
-  return `${accountId ?? ""}|${isoDay(date)}|${cents}|${merchantWords(merchant)}`;
+/**
+ * The text two copies of the same transaction share: account, day, amount in cents and
+ * the merchant's words. New imports compare amountCents (Sprint 5 #6); documents saved
+ * before that only have dollars, which centsOf rounds to cents (until the migration, #8).
+ */
+function duplicateKey(t) {
+  const { accountId, date, merchant } = t;
+  return `${accountId ?? ""}|${isoDay(date)}|${centsOf(t)}|${merchantWords(merchant)}`;
 }
 
 /**

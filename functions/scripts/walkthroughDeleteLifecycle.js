@@ -117,6 +117,11 @@ async function main() {
   const expected = fs.readFileSync(CSV, "utf8").trim().split("\n").length - 1;
   check(c.total === expected, `${expected} transactions saved in the top-level transactions/ collection`, `found ${c.total}`);
   check(c.docs.every((d) => d.get("userId") === alice.uid && d.get("deletedAt") === null), "each one has userId = alice and deletedAt = null");
+  // Sprint 5 #6: money in whole cents, plus the temporary dollars copy for the web app
+  check(
+    c.docs.every((d) => Number.isInteger(d.get("amountCents")) && d.get("amount") === d.get("amountCents") / 100),
+    "each amount is saved in whole cents (amountCents), with amount = amountCents / 100 for now"
+  );
 
   // 2. Delete ------------------------------------------------------------------------
   step("2. Alice deletes it (softDeleteImport)");

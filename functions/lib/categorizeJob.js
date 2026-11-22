@@ -13,6 +13,7 @@
 "use strict";
 
 const { categorizeTransactions } = require("./categorize");
+const { centsOf } = require("./money");
 
 // Transactions handled per call; the caller calls again while `more` is true
 const DEFAULT_LIMIT = 500;
@@ -51,7 +52,8 @@ async function runCategorization({
   const docs = snap.docs;
   const transactions = docs.map((d) => {
     const x = d.data();
-    return { merchant: x.merchant, amount: x.amount, date: x.date?.toDate ? x.date.toDate() : x.date };
+    // centsOf also reads documents saved before amountCents existed (until the migration, #8)
+    return { merchant: x.merchant, amountCents: centsOf(x), date: x.date?.toDate ? x.date.toDate() : x.date };
   });
   const { fields } = await categorizeTransactions(transactions, { classify, logger });
 

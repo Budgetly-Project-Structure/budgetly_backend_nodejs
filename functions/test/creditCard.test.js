@@ -24,18 +24,16 @@ const { toTransactionDocs } = require("../lib/transactions");
 
 const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name));
 const silentLogger = { info() {}, warn() {}, error() {} };
-const cents = (n) => Math.round(n * 100) / 100;
-
-/** Money in / money out of saved docs, leaving out transfers (what the web app shows). */
+/** Money in / money out of saved docs in cents, leaving out transfers (what the web app shows). */
 function totals(docs) {
   let moneyIn = 0;
   let moneyOut = 0;
   for (const d of docs) {
     if (d.category === "transfers") continue;
-    if (d.amount > 0) moneyIn += d.amount;
-    else moneyOut -= d.amount;
+    if (d.amountCents > 0) moneyIn += d.amountCents;
+    else moneyOut -= d.amountCents;
   }
-  return { moneyIn: cents(moneyIn), moneyOut: cents(moneyOut) };
+  return { moneyIn, moneyOut };
 }
 
 /** Minimal store that keeps what the pipeline writes. */
@@ -111,8 +109,8 @@ describe("isCardPayment", () => {
   test("toTransactionDocs applies the rules", () => {
     const docs = toTransactionDocs(
       [
-        { date: "2026-08-26", merchant: "AUTOMATIC PAYMENT - THANK YOU", amount: 2794.75, rowNumber: 8 },
-        { date: "2026-08-26", merchant: "STARBUCKS STORE 08812", amount: -7.48, rowNumber: 7 },
+        { date: "2026-08-26", merchant: "AUTOMATIC PAYMENT - THANK YOU", amountCents: 279475, rowNumber: 8 },
+        { date: "2026-08-26", merchant: "STARBUCKS STORE 08812", amountCents: -748, rowNumber: 7 },
       ],
       { uid: "alice", importId: "imp1", accountType: "credit" }
     );
@@ -147,11 +145,11 @@ describe("processImport: credit card statements", () => {
     assert.equal(result.status, "completed");
     assert.equal(docs.length, 18);
     // 16 purchases = $669.58 out; the $23.47 return is the only real money in
-    assert.deepEqual(totals(docs), { moneyIn: 23.47, moneyOut: 669.58 });
+    assert.deepEqual(totals(docs), { moneyIn: 2347, moneyOut: 66958 });
     const autopay = docs.find((d) => /AUTOPAY/.test(d.merchant));
-    assert.equal(autopay.amount, 350);
+    assert.equal(autopay.amountCents, 35000);
     assert.equal(autopay.category, "transfers");
-    assert.equal(docs.find((d) => /STARBUCKS/.test(d.merchant)).amount, -6.45);
+    assert.equal(docs.find((d) => /STARBUCKS/.test(d.merchant)).amountCents, -645);
   });
 
   test("a card file that already uses negative purchases is left as-is; the payment is a transfer", async () => {
@@ -159,11 +157,11 @@ describe("processImport: credit card statements", () => {
 
     assert.equal(docs.length, 13);
     const payment = docs.find((d) => /AUTOMATIC PAYMENT/.test(d.merchant));
-    assert.equal(payment.amount, 2794.75);
+    assert.equal(payment.amountCents, 279475);
     assert.equal(payment.category, "transfers");
     assert.equal(payment.categoryConfidence, 1);
     // Without the payment, money in is just the $31.51 refund
-    assert.deepEqual(totals(docs), { moneyIn: 31.51, moneyOut: 569.39 });
+    assert.deepEqual(totals(docs), { moneyIn: 3151, moneyOut: 56939 });
   });
 
   test("the same signed card file imported as checking still treats the payment as a transfer", async () => {
@@ -173,7 +171,7 @@ describe("processImport: credit card statements", () => {
 
   test("signs are never flipped for a checking account", async () => {
     const { docs } = await importFile("credit_card_no_balance_sept_2026.csv", "checking");
-    assert.equal(docs.find((d) => /STARBUCKS/.test(d.merchant)).amount, 6.45);
+    assert.equal(docs.find((d) => /STARBUCKS/.test(d.merchant)).amountCents, 645);
   });
 
   test("checking statements are unchanged: no transfers among ordinary bills and paychecks", async () => {

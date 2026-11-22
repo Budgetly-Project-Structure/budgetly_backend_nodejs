@@ -145,7 +145,7 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
         .where("userId", "==", uid)
         .where("source", "==", "import")
         .where("accountId", "==", accountId ?? null)
-        .select("date", "amount", "merchant", "accountId", "sourceStatementId", "deletedAt")
+        .select("date", "amountCents", "amount", "merchant", "accountId", "sourceStatementId", "deletedAt")
         .get();
       const counts = new Map();
       for (const d of snap.docs) {

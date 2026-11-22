@@ -24,7 +24,7 @@ const silentLogger = { info() {}, warn() {}, error() {} };
 /** Import documents as toTransactionDocs builds them. Names with no rule match stay uncategorized. */
 const docsFor = (rows) =>
   toTransactionDocs(
-    rows.map(([merchant, amount], i) => ({ date: "2026-09-02", merchant, amount, rowNumber: i + 2 })),
+    rows.map(([merchant, dollars], i) => ({ date: "2026-09-02", merchant, amountCents: Math.round(dollars * 100), rowNumber: i + 2 })),
     { uid: "alice", importId: "imp1" }
   );
 
@@ -100,7 +100,7 @@ describe("applyCache (SCRUM-75)", () => {
   test("money going out never gets the 'income' category", () => {
     const d = { ...docsFor([["Acme", -5]])[0], category: "uncategorized", categorySource: "none" };
     assert.equal(applyCache([d], cached).docs[0].category, "uncategorized");
-    const inn = { ...d, amount: 5 };
+    const inn = { ...d, amountCents: 500 };
     assert.equal(applyCache([inn], cached).docs[0].category, "income");
   });
 
@@ -314,7 +314,7 @@ describe("merchant cache in the import (SCRUM-75)", () => {
 
 // ---------------------------------------------------------------------------
 describe("chunking large imports (SCRUM-74)", () => {
-  const many = (n) => Array.from({ length: n }, (_, i) => ({ merchant: `Shop ${String.fromCharCode(65 + (i % 26))}`, amount: -(i + 1), date: "2026-09-02" }));
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ merchant: `Shop ${String.fromCharCode(65 + (i % 26))}`, amountCents: -(i + 1) * 100, date: "2026-09-02" }));
 
   test("sends the model chunks of at most 50 transactions", async () => {
     const calls = [];

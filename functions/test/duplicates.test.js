@@ -12,6 +12,7 @@ const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 
 const { duplicateKey, removeDuplicates } = require("../lib/duplicates");
+const { parseCents } = require("../lib/money");
 const { createStore } = require("../lib/firestoreStore");
 const { toTransactionDocs } = require("../lib/transactions");
 const { processImport, ALL_DUPLICATES } = require("../lib/importPipeline");
@@ -19,7 +20,8 @@ const { processImport, ALL_DUPLICATES } = require("../lib/importPipeline");
 const silentLogger = { info() {}, warn() {}, error() {} };
 const stamp = () => "SERVER_TS";
 
-const row = (date, merchant, amount, rowNumber) => ({ date, merchant, amount, rowNumber });
+// Parsed rows carry integer cents (Sprint 5 #6); the helper takes the statement text
+const row = (date, merchant, amount, rowNumber) => ({ date, merchant, amountCents: parseCents(String(amount)), rowNumber });
 const docsFor = (rows, importId = "imp2", accountId = "acct-checking") =>
   toTransactionDocs(rows, { uid: "alice", importId, accountId });
 
@@ -41,6 +43,16 @@ describe("duplicateKey", () => {
     assert.notEqual(key, duplicateKey({ ...base, date: new Date("2026-09-06T12:00:00Z") }));
     assert.notEqual(key, duplicateKey({ ...base, amount: -6.46 }));
     assert.notEqual(key, duplicateKey({ ...base, merchant: "STARBUCKS #1188" }));
+  });
+
+  test("an import in cents matches a document saved before cents (dollars only) for the same purchase", () => {
+    // Sprint 5 #6: new imports have amountCents; older documents only have amount in dollars
+    assert.equal(duplicateKey({ ...base, amount: undefined, amountCents: -645 }), duplicateKey({ ...base, amount: -6.45 }));
+    assert.notEqual(duplicateKey({ ...base, amount: undefined, amountCents: -646 }), duplicateKey({ ...base, amount: -6.45 }));
+  });
+
+  test("amountCents wins over a stale dollar amount on the same document", () => {
+    assert.equal(duplicateKey({ ...base, amountCents: -645, amount: 999 }), duplicateKey({ ...base, amount: undefined, amountCents: -645 }));
   });
 
   test("amounts that differ only by floating point noise match", () => {

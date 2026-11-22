@@ -22,7 +22,7 @@ const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name)
 /** Builds parser input from plain strings, one text piece per line (the "whole line in one piece" case). */
 const linesOf = (...strings) => strings.map((s) => ({ items: [{ str: s, x: 0, width: s.length * 5 }] }));
 const parse = (...strings) => parseLines(linesOf(...strings));
-const simple = (r) => r.transactions.map(({ date, merchant, amount }) => ({ date, merchant, amount }));
+const simple = (r) => r.transactions.map(({ date, merchant, amountCents }) => ({ date, merchant, amountCents }));
 
 // ---------------------------------------------------------------------------
 describe("sample PDF 1: signed Amount column with Balance (2 pages)", () => {
@@ -30,7 +30,7 @@ describe("sample PDF 1: signed Amount column with Balance (2 pages)", () => {
     const r = await parseStatementPdf(fixture("bank_a_checking_sept_2026.pdf"));
     assert.equal(r.errorCount, 0);
     assert.equal(r.transactions.length, 37); // 36 rows from the CSV + 1 extra transfer
-    assert.deepEqual(r.transactions[0], { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amount: 1850, rowNumber: r.transactions[0].rowNumber });
+    assert.deepEqual(r.transactions[0], { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amountCents: 185000, rowNumber: r.transactions[0].rowNumber });
     assert.equal(r.meta.layout, "amount column");
   });
 
@@ -70,16 +70,16 @@ describe("sample PDF 2: Withdrawals / Deposits columns, dates without a year", (
     assert.equal(r.errorCount, 0);
     assert.equal(r.transactions.length, 11);
     assert.equal(r.meta.layout, "debit-credit columns");
-    assert.deepEqual(simple(r)[0], { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amount: 1850 });
-    assert.deepEqual(simple(r)[1], { date: "2026-09-02", merchant: "Hy-Vee Grocery", amount: -96.42 });
-    assert.deepEqual(simple(r)[3], { date: "2026-09-05", merchant: "Venmo Cashout", amount: 40 });
-    assert.deepEqual(simple(r).at(-1), { date: "2026-09-28", merchant: "Interest Paid", amount: 0.84 });
+    assert.deepEqual(simple(r)[0], { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amountCents: 185000 });
+    assert.deepEqual(simple(r)[1], { date: "2026-09-02", merchant: "Hy-Vee Grocery", amountCents: -9642 });
+    assert.deepEqual(simple(r)[3], { date: "2026-09-05", merchant: "Venmo Cashout", amountCents: 4000 });
+    assert.deepEqual(simple(r).at(-1), { date: "2026-09-28", merchant: "Interest Paid", amountCents: 84 });
   });
 
   test("the Balance column is not mistaken for an amount, and the totals line is skipped", async () => {
     const r = await parseStatementPdf(fixture("bank_b_credit_union_sept_2026.pdf"));
-    const sum = r.transactions.reduce((s, t) => s + t.amount, 0);
-    assert.equal(Math.round(sum * 100) / 100, 3345.14); // deposits 3,740.84 minus withdrawals 395.70
+    const sum = r.transactions.reduce((s, t) => s + t.amountCents, 0);
+    assert.equal(sum, 334514); // deposits 3,740.84 minus withdrawals 395.70
     assert.ok(r.transactions.every((t) => !/total/i.test(t.merchant)));
     assert.equal(r.meta.accountLast4, "7732");
   });
@@ -123,7 +123,7 @@ describe("parseLines: layouts and formats", () => {
       "09/04/2026 Refund 12.00 CR",
       "09/05/2026 Paycheck $1,200.00"
     );
-    assert.deepEqual(r.transactions.map((t) => t.amount), [-4.5, -52.1, -30, 12, 1200]);
+    assert.deepEqual(r.transactions.map((t) => t.amountCents), [-450, -5210, -3000, 1200, 120000]);
   });
 
   test("unsigned amounts use how the running balance moved", () => {
@@ -134,7 +134,7 @@ describe("parseLines: layouts and formats", () => {
       "09/02/2026 Paycheck 1,200.00 2,195.50",
       "09/03/2026 Rent 900.00 1,295.50"
     );
-    assert.deepEqual(r.transactions.map((t) => t.amount), [-4.5, 1200, -900]);
+    assert.deepEqual(r.transactions.map((t) => t.amountCents), [-450, 120000, -90000]);
   });
 
   test("dates without a year use the statement period, including across New Year", () => {
@@ -162,7 +162,7 @@ describe("parseLines: layouts and formats", () => {
 
   test("with no header row, the last number is taken as the balance when there are two", () => {
     const r = parse("09/01/2026 Coffee shop -4.50 995.50", "09/02/2026 Bakery -3.00 992.50");
-    assert.deepEqual(r.transactions.map((t) => t.amount), [-4.5, -3]);
+    assert.deepEqual(r.transactions.map((t) => t.amountCents), [-450, -300]);
   });
 
   test("headers, balances, totals and period lines are not transactions", () => {

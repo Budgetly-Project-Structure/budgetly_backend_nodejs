@@ -189,7 +189,7 @@ function purchasesLookPositive(parsed) {
   const cols = parsed.meta?.columns ?? {};
   if (!cols.amount || cols.debit || cols.credit || cols.type) return false;
   const list = parsed.transactions;
-  return list.length > 0 && list.filter((t) => t.amount > 0).length > list.length / 2;
+  return list.length > 0 && list.filter((t) => t.amountCents > 0).length > list.length / 2;
 }
 
 async function processImport(opts) {

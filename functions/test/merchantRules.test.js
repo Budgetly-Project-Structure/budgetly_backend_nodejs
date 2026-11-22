@@ -98,7 +98,7 @@ describe("categorizeByRules order", () => {
   test("most rows of the sample statements are categorized for free", () => {
     const rate = (file) => {
       const { transactions } = parseStatementCsv(fs.readFileSync(path.join(__dirname, "fixtures", file)));
-      const hit = transactions.filter((t) => categorizeByRules(t.merchant, t.amount, null).category !== "uncategorized");
+      const hit = transactions.filter((t) => categorizeByRules(t.merchant, t.amountCents, null).category !== "uncategorized");
       return hit.length / transactions.length;
     };
     for (const file of ["checking_sept_2026.csv", "credit_card_signed_aug_2026.csv", "credit_card_no_balance_sept_2026.csv"]) {

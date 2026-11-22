@@ -81,7 +81,7 @@ function applyCache(docs, cached) {
     if (d.categorySource !== "none") return d;
     const entry = cached.get(merchantKey(d.merchant));
     if (!entry || !isKnownCategory(entry.category) || entry.category === UNCATEGORIZED) return d;
-    if (entry.category === "income" && !(d.amount > 0)) return d;
+    if (entry.category === "income" && !(d.amountCents > 0)) return d;
     hits++;
     return {
       ...d,

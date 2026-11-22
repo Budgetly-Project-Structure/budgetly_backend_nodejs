@@ -34,7 +34,7 @@ const PAYMENT_WORD = /\b(pmt|payment|autopay|auto\s*pay|e-?payment|epay)\b/i;
  * True if this line is a credit card payment (either side of it).
  *
  * @param {string} merchant  Description from the statement
- * @param {number} amount    Negative = money out, positive = money in
+ * @param {number} amount    Amount in cents (only the sign is used): negative = money out, positive = money in
  * @param {string|null} [accountType]  "credit", "checking" or null (unknown)
  */
 function isCardPayment(merchant, amount, accountType = null) {
