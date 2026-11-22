@@ -210,7 +210,8 @@ describe("processImport: overlapping statements (SCRUM-136)", () => {
     assert.equal(result.duplicateRowCount, 2);
     assert.deepEqual(store.written.map((d) => d.merchant), ["ACME PAYROLL"]);
     assert.equal(store.updates.at(-1).duplicateRowCount, 2);
-    assert.equal(store.updates.at(-1).transactionCount, 1);
+    // The count is returned, never saved on the import record (Sprint 5 #2)
+    assert.equal("transactionCount" in store.updates.at(-1), false);
   });
 
   test("a file with no overlap imports everything and reports zero duplicates", async () => {

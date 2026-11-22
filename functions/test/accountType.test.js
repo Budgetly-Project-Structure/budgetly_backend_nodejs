@@ -119,7 +119,7 @@ describe("the import uses the detected type", () => {
     const store = await run("credit_card_no_balance_sept_2026.csv");
     assert.equal(store.final().status, "completed");
     assert.equal(store.final().detectedAccountType, "credit");
-    assert.equal(store.final().accountType, "credit");
+    assert.equal("accountType" in store.final(), false); // the account has the type (Sprint 5 #2)
     assert.equal(store.final().accountId, "acct-credit");
     // Purchases were positive in the file; read as a card statement they become spending
     const amazon = store.saved.find((t) => t.merchant.startsWith("AMAZON.COM*"));
@@ -135,7 +135,7 @@ describe("the import uses the detected type", () => {
 
   test("what the user picked always wins; the detected type is still recorded", async () => {
     const store = await run("credit_card_no_balance_sept_2026.csv", { accountId: "acct-checking", accountType: "checking" });
-    assert.equal(store.final().accountType, "checking");
+    assert.equal("accountType" in store.final(), false);
     assert.equal(store.final().accountId, "acct-checking");
     assert.equal(store.final().detectedAccountType, "credit");
   });
@@ -152,7 +152,7 @@ describe("the import uses the detected type", () => {
     });
     assert.equal(store.final().status, "completed");
     assert.equal(store.final().detectedAccountType, null);
-    assert.equal(store.final().accountType, null);
+    assert.equal("accountType" in store.final(), false);
     assert.equal(store.final().accountId, null);
   });
 });

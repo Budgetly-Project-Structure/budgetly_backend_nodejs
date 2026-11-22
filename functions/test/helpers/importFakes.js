@@ -56,7 +56,6 @@ function fakeFirestore(docs = {}) {
 function seedImport(docs, uid, importId, n, imp = {}) {
   docs[`users/${uid}/imports/${importId}`] = {
     status: "completed",
-    fileName: `${importId}.csv`,
     storagePath: `users/${uid}/imports/1700000000000_${importId}.csv`,
     deletedAt: null,
     ...imp,

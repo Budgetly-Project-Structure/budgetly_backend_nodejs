@@ -72,7 +72,7 @@ describe("softDeleteImport", () => {
       targetPath: "users/alice/imports/imp1",
       actor: "alice",
       at: "SERVER_TIME",
-      details: { fileName: "imp1.csv", transactionCount: 2 },
+      details: { fileName: "1700000000000_imp1.csv", transactionCount: 2 }, // from storagePath
     }]);
   });
 

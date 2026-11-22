@@ -154,7 +154,7 @@ describe("runPurge: what it removes", () => {
       "users/u1/budgets/dining": { categoryId: "dining", limit: 200, ...active() },
       "users/u1/budgets/legacy": { categoryId: "legacy", limit: 50 },
       "users/u1": { email: "a@b.com" },
-      "users/u1/imports/imp1": { fileName: "a.csv", status: "completed" },
+      "users/u1/imports/imp1": { storagePath: "users/u1/imports/1_a.csv", status: "completed" },
       "users/u1/merchantCache/starbucks": { merchantKey: "STARBUCKS", category: "dining" },
     });
     const result = await run(db);

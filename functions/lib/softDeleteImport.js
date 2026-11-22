@@ -17,6 +17,7 @@
 "use strict";
 
 const { DeleteImportError, IMPORT_ID } = require("./deleteImport");
+const { fileNameFromPath } = require("./importFile");
 
 // How long a deleted statement can be restored
 const RETENTION_DAYS = 30;
@@ -74,7 +75,7 @@ async function softDeleteImport({ uid, importId, openStore, writeAudit, now = Da
     action: "import.deleted",
     targetPath: `users/${uid}/imports/${importId}`,
     actor: uid,
-    details: { fileName: imp.fileName ?? null, transactionCount: deletedTransactions },
+    details: { fileName: fileNameFromPath(imp.storagePath), transactionCount: deletedTransactions },
   });
 
   logger.info("Import soft deleted", { uid, importId, deletedTransactions });

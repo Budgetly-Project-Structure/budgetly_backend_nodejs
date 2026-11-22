@@ -13,7 +13,7 @@
  * and unauthenticatedContext() is someone not logged in.
  */
 const { initializeTestEnvironment, assertFails, assertSucceeds } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, collection, query, where, Timestamp, serverTimestamp } = require('firebase/firestore');
+const { doc, getDoc, getDocs, getCountFromServer, setDoc, updateDoc, deleteDoc, collection, query, where, Timestamp, serverTimestamp } = require('firebase/firestore');
 const fs = require('fs');
 
 // The test environment: an emulator connection that loads our real rules file
@@ -427,6 +427,18 @@ describe('Firestore security rules: ownership and impersonation (SCRUM-114)', ()
 
     it('an unauthenticated query is rejected', () =>
       assertFails(getDocs(query(collection(unauth(), 'transactions'), where('userId', '==', 'alice')))));
+
+    // The Import page counts an import's transactions instead of reading a stored copy (Sprint 5 #2)
+    it("counting one import's transactions works for the owner", () =>
+      assertSucceeds(getCountFromServer(query(collection(alice(), 'transactions'),
+        where('userId', '==', 'alice'), where('sourceStatementId', '==', 'imp1')))));
+
+    it("counting someone else's import's transactions is rejected", () =>
+      assertFails(getCountFromServer(query(collection(bob(), 'transactions'),
+        where('userId', '==', 'alice'), where('sourceStatementId', '==', 'imp1')))));
+
+    it('a count with no userId filter is rejected', () =>
+      assertFails(getCountFromServer(query(collection(alice(), 'transactions'), where('sourceStatementId', '==', 'imp1')))));
   });
 
   describe('creating (impersonation)', () => {

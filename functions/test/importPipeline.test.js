@@ -214,9 +214,9 @@ describe("processImport: happy path", () => {
     assert.equal(result.status, "completed");
     assert.equal(result.transactionCount, 36);
     assert.equal(store.written.length, 36);
+    // No transactionCount on the import record: the transactions are the count (Sprint 5 #2)
     assert.deepEqual(last(store), {
       status: "completed",
-      transactionCount: 36,
       skippedRowCount: 0,
       duplicateRowCount: 0,
       rowErrors: [],
@@ -272,7 +272,7 @@ describe("processImport: failures (SCRUM-28)", () => {
     const result = await run(store, { fileBuffer: Buffer.from("") });
     assert.equal(result.status, "failed");
     assert.equal(result.error, "This file is empty.");
-    assert.deepEqual(last(store), { status: "failed", error: "This file is empty.", transactionCount: 0 });
+    assert.deepEqual(last(store), { status: "failed", error: "This file is empty." });
     assert.equal(store.deleted, 0);
   });
 
@@ -334,7 +334,7 @@ describe("processImport: timeouts (SCRUM-28)", () => {
     const result = await run(store, { fileBuffer: fixture("checking_sept_2026.csv"), timeoutMs: 50 });
     assert.equal(result.status, "failed");
     assert.equal(result.error, TIMED_OUT);
-    assert.deepEqual(last(store), { status: "failed", error: TIMED_OUT, transactionCount: 0 });
+    assert.deepEqual(last(store), { status: "failed", error: TIMED_OUT });
     assert.ok(store.deleted >= 1);
   });
 

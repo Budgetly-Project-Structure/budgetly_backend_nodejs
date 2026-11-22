@@ -15,6 +15,7 @@
 "use strict";
 
 const { DeleteImportError, IMPORT_ID } = require("./deleteImport");
+const { fileNameFromPath } = require("./importFile");
 
 /** Reads a Firestore Timestamp, a Date or a number of milliseconds as milliseconds. */
 function toMillis(value) {
@@ -75,7 +76,7 @@ async function restoreImport({ uid, importId, openStore, writeAudit, now = Date.
     action: "import.restored",
     targetPath: `users/${uid}/imports/${importId}`,
     actor: uid,
-    details: { fileName: imp.fileName ?? null, transactionCount: restoredTransactions },
+    details: { fileName: fileNameFromPath(imp.storagePath), transactionCount: restoredTransactions },
   });
 
   logger.info("Import restored", { uid, importId, restoredTransactions });

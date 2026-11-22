@@ -10,7 +10,9 @@
  *
  *   completed  at least one transaction was saved. Rows that couldn't be read
  *              are counted in `skippedRowCount` and listed in `rowErrors`
- *              (so the UI can show "34 of 36 imported").
+ *              (so the UI can show "34 imported, 2 skipped"). How many were saved
+ *              isn't stored on the import: the app counts the transactions whose
+ *              sourceStatementId is this import (Sprint 5 #2).
  *   failed     nothing was saved. `error` holds a message written for users;
  *              the Import page shows it as-is.
  *
@@ -70,7 +72,7 @@ async function runImport(
   state
 ) {
   const fail = async (message) => {
-    await store.update({ status: "failed", error: message, transactionCount: 0 });
+    await store.update({ status: "failed", error: message });
     return { status: "failed", transactionCount: 0, skippedRowCount: 0, error: message };
   };
 
@@ -83,11 +85,12 @@ async function runImport(
     let parsed = fileType === "pdf" ? await parseStatementPdf(fileBuffer) : parseStatementCsv(fileBuffer);
 
     // Checking or credit card (SCRUM-135): what the user picked, or else what the file looks like.
-    // The import record keeps both, so the Import page can show what was detected.
+    // The import record keeps the account and what was detected; the type itself belongs to
+    // the account, so it isn't saved again (data-duplication-audit.md, D4).
     const detected = detectAccountType(parsed);
     const accountType = pickedType ?? detected.type;
     const accountId = pickedAccountId ?? (accountType ? ACCOUNT_ID_FOR_TYPE[accountType] : null);
-    await store.update({ accountType, accountId, detectedAccountType: detected.type });
+    await store.update({ accountId, detectedAccountType: detected.type });
     logger.info("Account type", { uid, importId, picked: pickedType, detected: detected.type, reasons: detected.reasons });
     // Many card exports list purchases as positive numbers. On a credit account with one
     // Amount column where most rows are positive, read it again with the signs flipped.
@@ -143,8 +146,12 @@ async function runImport(
       skippedRowCount: parsed.errorCount,
       duplicateRowCount,
     };
+    // transactionCount is only returned (for the log), never saved: the transactions
+    // themselves are the count (data-duplication-audit.md, D1)
     await store.update({
-      ...result,
+      status: "completed",
+      skippedRowCount: result.skippedRowCount,
+      duplicateRowCount,
       rowErrors: parsed.errors, // [{row, reason}], capped at 100 by the parser
       error: null,
     });
@@ -211,7 +218,7 @@ async function processImport(opts) {
     logger.error("Cleanup after timed-out import failed", { uid, importId, message: cleanupErr.message });
   }
   try {
-    await store.update({ status: "failed", error: TIMED_OUT, transactionCount: 0 });
+    await store.update({ status: "failed", error: TIMED_OUT });
   } catch (statusErr) {
     logger.error("Could not mark timed-out import as failed", { uid, importId, message: statusErr.message });
   }
