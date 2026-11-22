@@ -23,9 +23,7 @@ const expired = (extra = {}) => ({ deletedAt: daysFromNow(-31), deletedBy: "alic
 function importDoc(uid, importId, extra = {}) {
   return {
     status: "completed",
-    fileName: `${importId}.csv`,
     storagePath: `users/${uid}/imports/1700000000000_${importId}.csv`,
-    transactionCount: 2,
     deletedAt: null,
     deletedBy: null,
     purgeAfter: null,
@@ -145,6 +143,7 @@ describe("purgeImports", () => {
     const db = fakeDb({
       "users/alice/imports/imp1": imp,
       "transactions/alice_imp1_1": txn("alice", "imp1"),
+      "transactions/alice_imp1_2": txn("alice", "imp1"),
     });
     const files = new Set([imp.storagePath]);
 
@@ -159,7 +158,8 @@ describe("purgeImports", () => {
       action: "import.purged",
       targetPath: "users/alice/imports/imp1",
       actor: "system",
-      details: { fileName: "imp1.csv", transactionCount: 2 },
+      // fileName from storagePath; transactionCount = the transactions it removed (Sprint 5 #2)
+      details: { fileName: "1700000000000_imp1.csv", transactionCount: 2 },
     }]);
   });
 
@@ -276,5 +276,68 @@ describe("runPurge without deleteFile/writeAudit", () => {
 
     assert.equal(result.imports, 0);
     assert.equal(db.docs.has("users/alice/imports/imp1"), true);
+  });
+});
+
+describe("runPurge with statements (Sprint 5 #2)", () => {
+  test("statements go before the transaction sweep, so the audit entry counts every transaction removed", async () => {
+    const imp = importDoc("alice", "imp1", expired());
+    const db = fakeDb({
+      "users/alice/imports/imp1": imp,
+      // softDeleteImport gives a statement's transactions the same purgeAfter, so the
+      // transaction sweep would remove them too if it ran first
+      "transactions/alice_imp1_1": txn("alice", "imp1"),
+      "transactions/alice_imp1_2": txn("alice", "imp1"),
+      "transactions/alice_imp1_3": txn("alice", "imp1"),
+      "transactions/manual1": { userId: "alice", source: "manual", ...expired() },
+    });
+    const ms = (v) => (v == null ? null : v.getTime());
+    // Transactions: equality filters (purgeImports) and purgeAfter <= now (the sweep)
+    db.collection = (name) => {
+      assert.equal(name, "transactions");
+      const filters = [];
+      let max = Infinity;
+      const q = {
+        where(field, op, value) { filters.push([field, op, value]); return q; },
+        limit(n) { max = n; return q; },
+        async get() {
+          const paths = [...db.docs.keys()]
+            .filter((p) => p.startsWith("transactions/"))
+            .filter((p) => filters.every(([f, op, v]) => {
+              const x = db.docs.get(p).data[f];
+              return op === "==" ? x === v : x != null && ms(x) <= ms(v);
+            }))
+            .slice(0, max);
+          const docs = paths.map((p) => ({ ref: { path: p }, updateTime: db.docs.get(p).version, data: () => db.docs.get(p).data }));
+          return { docs, size: docs.length, empty: docs.length === 0 };
+        },
+      };
+      return q;
+    };
+    const realGroup = db.collectionGroup.bind(db);
+    const emptyQuery = { where: () => emptyQuery, limit: () => emptyQuery, get: async () => ({ docs: [], size: 0, empty: true }) };
+    db.collectionGroup = (name) => (name === "budgets" ? emptyQuery : realGroup(name));
+    db.bulkWriter = () => {
+      const pending = [];
+      return {
+        onWriteError() {},
+        delete(ref) { const p = Promise.resolve().then(() => db.docs.delete(ref.path)); pending.push(p); return p; },
+        close: () => Promise.all(pending),
+      };
+    };
+    const audit = [];
+
+    const result = await runPurge({
+      db,
+      now: NOW,
+      deleteFile: async () => {},
+      writeAudit: async (entry) => audit.push(entry),
+      logger: silentLogger,
+    });
+
+    assert.equal(result.imports, 1);
+    assert.equal(result.transactions, 1, "the sweep only found the manual one");
+    assert.equal(audit[0].details.transactionCount, 3);
+    assert.equal([...db.docs.keys()].some((k) => k.startsWith("transactions/")), false);
   });
 });

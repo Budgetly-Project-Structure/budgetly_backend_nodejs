@@ -178,7 +178,9 @@ async function main() {
   const quiet = { info() {}, warn() {}, error() {} };
   const purgeDeps = { db, now: later, writeAudit: createAuditWriter({ db }), logger: quiet };
   const purged = await runPurge({ ...purgeDeps, deleteFile: (filePath) => bucket.file(filePath).delete({ ignoreNotFound: true }) });
-  check(purged.transactions === expected && purged.imports === 1, `purge removed the ${expected} transactions and the statement`, JSON.stringify(purged));
+  // The statement goes first and removes its own transactions (counted in its audit entry,
+  // checked below), so the transaction sweep has none of them left (Sprint 5 #2)
+  check(purged.imports === 1 && purged.transactions === 0, "purge removed the statement (with its transactions)", JSON.stringify(purged));
   c = await txnCounts(alice.uid, importId);
   check(c.total === 0, "no transactions from that statement are left", `${c.total} left`);
   check(!(await db.doc(`users/${alice.uid}/imports/${importId}`).get()).exists, "the import record is gone");

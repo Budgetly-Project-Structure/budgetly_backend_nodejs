@@ -14,9 +14,9 @@
  *                                     the ones from a deleted statement)
  *   users/{uid}/budgets/{categoryId}  budgets the user removed
  *   users/{uid}/imports/{importId}    statements the user deleted (SCRUM-122): the
- *                                     import record, the file in Storage, and any of its
- *                                     transactions still left, plus an "import.purged"
- *                                     audit entry with actor "system"
+ *                                     import record, its transactions, the file in Storage,
+ *                                     plus an "import.purged" audit entry with actor
+ *                                     "system". Statements go first (Sprint 5 #2)
  *
  * Safety checks, because this deletes data:
  *   - only documents with both deletedAt and purgeAfter set, and purgeAfter in the past
@@ -25,6 +25,8 @@
  *   - the job stops if a page makes no progress, and after a maximum number of pages
  */
 "use strict";
+
+const { fileNameFromPath } = require("./importFile");
 
 // Documents read (and deleted) per page
 const DEFAULT_LIMIT = 400;
@@ -94,10 +96,12 @@ async function purgeQuery({ db, makeQuery, nowMs, limit, maxPages, logger, label
  * Removes statements whose 30 days are up (SCRUM-122). For each one, in this order:
  *   1. the import record, with the same "unchanged since we read it" check as above,
  *      so a statement restored while the job runs is left alone (and so is its file)
- *   2. any of its transactions still left (normally the step above already removed
- *      them, since they share the statement's purgeAfter), in batches of 400 or fewer
+ *   2. its transactions, in batches of 400 or fewer. runPurge does statements before
+ *      the transaction sweep, so they are all still here and get counted
  *   3. the file in Storage (already gone is fine)
- *   4. an "import.purged" audit entry with actor "system"
+ *   4. an "import.purged" audit entry with actor "system", whose transactionCount is
+ *      how many transactions step 2 removed (the import record no longer stores a
+ *      count, Sprint 5 #2)
  * A file outside the owner's own folder is never deleted.
  * @returns {Promise<{deleted: number, skipped: number}>}
  */
@@ -128,8 +132,8 @@ async function purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, write
         continue;
       }
 
-      // 2. Its transactions still left
-      let leftover = 0;
+      // 2. Its transactions, counted for the audit entry
+      let removedTransactions = 0;
       for (;;) {
         const txns = await db.collection("transactions")
           .where("userId", "==", uid)
@@ -140,7 +144,7 @@ async function purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, write
         const batch = db.batch();
         txns.docs.forEach((t) => batch.delete(t.ref));
         await batch.commit();
-        leftover += txns.size;
+        removedTransactions += txns.size;
       }
 
       // 3. The file, only from the owner's own folder
@@ -160,10 +164,10 @@ async function purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, write
         action: "import.purged",
         targetPath: `users/${uid}/imports/${importId}`,
         actor: "system",
-        details: { fileName: imp.fileName ?? null, transactionCount: imp.transactionCount ?? null },
+        details: { fileName: fileNameFromPath(imp.storagePath), transactionCount: removedTransactions },
       });
       removed++;
-      logger.info("Purged statement", { uid, importId, leftoverTransactions: leftover });
+      logger.info("Purged statement", { uid, importId, removedTransactions });
     }
     deleted += removed;
     // Same stop rules as purgeQuery
@@ -187,6 +191,12 @@ async function purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, write
 async function runPurge({ db, now = new Date(), limit = DEFAULT_LIMIT, maxPages = DEFAULT_MAX_PAGES, deleteFile, writeAudit, logger = console }) {
   const nowMs = now.getTime();
 
+  // Statements first, so purgeImports removes (and counts) their transactions itself.
+  // The transaction sweep below then only finds manual ones, plus any a statement left behind.
+  const imports = deleteFile && writeAudit
+    ? await purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, writeAudit, logger })
+    : { deleted: 0, skipped: 0 };
+
   // purgeAfter <= now only matches documents that have a purgeAfter, so active ones
   // (purgeAfter null) are never returned
   const txns = await purgeQuery({
@@ -208,11 +218,6 @@ async function runPurge({ db, now = new Date(), limit = DEFAULT_LIMIT, maxPages 
     logger,
     label: "budgets",
   });
-
-  // Statements last, so their transactions are already gone by the time the record goes
-  const imports = deleteFile && writeAudit
-    ? await purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, writeAudit, logger })
-    : { deleted: 0, skipped: 0 };
 
   const result = {
     transactions: txns.deleted,

@@ -134,12 +134,11 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
     return;
   }
   if (!existing.exists) {
+    // The file name and type are read from storagePath, and the account type from the
+    // account, so they aren't saved again here (data-duplication-audit.md, D4/D5)
     await importRef.set({
-      fileName,                          // shown in the UI
-      storagePath: filePath,             // where the parser downloads it from
-      fileType: ext,                     // "csv" or "pdf": decides which parser runs
+      storagePath: filePath,             // where the parser downloads it from; also gives the file name and type
       accountId,                         // which account the statement is for (may be null)
-      accountType,                       // "credit", "checking" or null
       sizeBytes: Number(event.data.size),
       status: "uploaded",                // lifecycle: uploaded → processing → completed | failed
       uploadedAt: FieldValue.serverTimestamp(),
@@ -157,7 +156,6 @@ exports.onStatementUploaded = onObjectFinalized({ timeoutSeconds: 120 }, async (
     await store.update({
       status: "failed",
       error: "We couldn't read the uploaded file. Please try uploading it again.",
-      transactionCount: 0,
     });
     return;
   }
