@@ -53,6 +53,46 @@ Deploy (requires project access):
 firebase deploy --only functions
 ```
 
+## Backups (Sprint 5 #15)
+
+Every day at 3 AM Central the `purgeDeleted` scheduled function first starts a **Firestore export** of the whole default database to the default Storage bucket, in `backups/YYYY-MM-DD/`, and deletes backups older than 7 days (`functions/lib/backupJob.js`). If the export can't be started, that day's cleanup is skipped, so nothing is removed without a fresh backup. The full plan, and how backups differ from the archive, is in budgetly_assets `docs/data-framework.md`.
+
+It costs nothing: no second database, no paid managed backups or point-in-time recovery, and no new Cloud Scheduler job. An export is billed as one read per document, far under the free 50,000 reads a day at our size, and a week of exports is a few MB in the bucket. Check the billing report after the first week to confirm. Users can never reach `backups/` (`storage.rules`).
+
+### One-time setup
+
+The functions run as the project's default compute service account, which needs permission to start exports. Find the project number on the Firebase console's Project settings page, then (once, as a project owner):
+
+```bash
+gcloud projects add-iam-policy-binding budgetly-backend-nodejs \
+  --member="serviceAccount:<PROJECT_NUMBER>-compute@developer.gserviceaccount.com" \
+  --role="roles/datastore.importExportAdmin"
+```
+
+That's the **Cloud Datastore Import Export Admin** role. Without it the function logs "Backup could not be started" and skips the cleanup. Granting a role is free.
+
+### Back up by hand
+
+Before a risky script or a migration (needs your own Google login with the same role, which project owners have):
+
+```bash
+gcloud auth application-default login
+cd functions
+npm run backup -- --project budgetly-backend-nodejs
+```
+
+It writes to `backups/YYYY-MM-DD-manual-HHMM/` (UTC). Pass `--bucket <name>` if the default bucket isn't `<project>.firebasestorage.app`.
+
+### Restore (admins only, never from the app)
+
+```bash
+gcloud firestore import gs://<default bucket>/backups/2026-11-22/ --project <project>
+```
+
+An import writes every document in the backup over the matching document in the database, and doesn't delete documents created later. **Practice on a throwaway Firebase project or the emulator first, never on live**, then copy back only what's needed with an admin script.
+
+On the local emulators there's no export API: `purgeDeleted` skips the backup there and still runs the cleanup.
+
 ## Secrets
 
 API keys (e.g., the AI model key) are stored with Firebase Functions secrets and are never committed or placed in frontend code.
