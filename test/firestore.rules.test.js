@@ -6,8 +6,11 @@
  * read/write to succeed or fail.
  *
  * Run from budgetly_backend_nodejs/ (not functions/):
- *   1. firebase emulators:start --only firestore   (in one terminal)
- *   2. npm test                                   (in another; runs mocha)
+ *   1. firebase emulators:start --only firestore,storage   (in one terminal)
+ *   2. npm test                                           (in another; runs mocha)
+ * or in one go:
+ *   firebase emulators:exec --only firestore,storage --project demo-budgetly "npm test"
+ * (storage.rules.test.js needs the Storage emulator too, Sprint 5 #11.)
  *
  * Users: "alice" owns the test transaction, "bob" is a different logged-in user,
  * and unauthenticatedContext() is someone not logged in.
@@ -575,6 +578,52 @@ describe('Firestore security rules: audit log', () => {
     await assertFails(updateDoc(doc(alice(), 'auditLog/a1'), { action: 'nothing.happened' }));
     await assertFails(deleteDoc(doc(alice(), 'auditLog/a1')));
   });
+});
+
+// Archive (Sprint 5 #11): top-level archive_* collections are for the server and admin
+// scripts only. Nobody can read or write them from the app, not even the owner.
+describe('Firestore security rules: archive (Sprint 5 #11)', () => {
+  const archived = {
+    archive_transactions: { id: 'alice_imp1_00002', data: { userId: 'alice', merchant: 'Starbucks', amountCents: -645, originalPath: 'transactions/alice_imp1_00002' } },
+    archive_imports: { id: 'alice_imp1', data: { userId: 'alice', storagePath: 'users/alice/imports/1_a.csv', originalPath: 'users/alice/imports/imp1', archivedFilePath: 'archive/users/alice/imports/1_a.csv' } },
+    archive_budgets: { id: 'alice_dining', data: { userId: 'alice', limit: 200, originalPath: 'users/alice/budgets/dining' } },
+  };
+  const seed = () =>
+    env.withSecurityRulesDisabled(async (ctx) => {
+      for (const [col, { id, data }] of Object.entries(archived)) {
+        await setDoc(doc(ctx.firestore(), `${col}/${id}`), { ...data, archivedAt: Timestamp.now() });
+      }
+    });
+
+  for (const [col, { id, data }] of Object.entries(archived)) {
+    describe(col, () => {
+      it("the owner can't read their own archived document, or list them by userId", async () => {
+        await seed();
+        await assertFails(getDoc(doc(alice(), `${col}/${id}`)));
+        await assertFails(getDocs(query(collection(alice(), col), where('userId', '==', 'alice'))));
+      });
+
+      it("other users and signed-out users can't read it", async () => {
+        await seed();
+        await assertFails(getDoc(doc(bob(), `${col}/${id}`)));
+        await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), `${col}/${id}`)));
+      });
+
+      it("nobody can create, change or delete archived documents from the app, not even the owner", async () => {
+        await seed();
+        await assertFails(setDoc(doc(alice(), `${col}/new`), { ...data, archivedAt: Timestamp.now() }));
+        await assertFails(updateDoc(doc(alice(), `${col}/${id}`), { userId: 'alice' }));
+        await assertFails(deleteDoc(doc(alice(), `${col}/${id}`)));
+      });
+    });
+  }
+
+  it('the server (Admin SDK) can still write and read the archive', () =>
+    env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'archive_transactions/x'), { userId: 'alice', archivedAt: Timestamp.now() });
+      const snap = await getDoc(doc(ctx.firestore(), 'archive_transactions/x'));
+      if (!snap.exists()) throw new Error('expected the server to see its archived doc');
+    }));
 });
 
 // The budget sets itself each month (SCRUM-137): budgets say who chose the limit, and
