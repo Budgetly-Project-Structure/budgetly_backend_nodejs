@@ -54,7 +54,7 @@ const RULES = [
  * The category for a merchant from the keyword list, or null if nothing matches.
  *
  * @param {string} merchant  Description from the statement
- * @param {number} amount    Negative = money out, positive = money in
+ * @param {number} amount    Amount in cents (only the sign is used): negative = money out, positive = money in
  * @returns {{category: string, categoryConfidence: number, categorySource: "rule"}|null}
  */
 function categorizeMerchant(merchant, amount) {

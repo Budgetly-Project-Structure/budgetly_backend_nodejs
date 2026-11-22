@@ -11,7 +11,10 @@
  *     userId            owner (the contracts say every doc carries this)
  *     date              Firestore Timestamp (a JS Date here; the Admin SDK converts it)
  *     merchant          raw merchant text from the statement
- *     amount            dollars, negative = spending, positive = income
+ *     amountCents       integer cents, negative = spending, positive = income (Sprint 5 #6)
+ *     amount            TEMPORARY: dollars (amountCents / 100), still written so the live
+ *                       web app keeps working until it reads cents (Sprint 5 #5/#7).
+ *                       Deprecated; the migration (#8) removes it
  *     category          "transfers" for credit card payments (transferRules.js),
  *                       otherwise "uncategorized" until the AI step runs (a later ticket)
  *     categoryConfidence  1 for a rule match, otherwise null until categorized
@@ -30,6 +33,7 @@
 "use strict";
 
 const { categorizeByRules } = require("./transferRules");
+const { centsToDollars } = require("./money");
 
 /**
  * Dates are stored at 12:00 UTC. A bare midnight timestamp can display as the
@@ -52,7 +56,7 @@ function transactionId(uid, importId, rowNumber) {
 }
 
 /**
- * @param {{date: string, merchant: string, amount: number, rowNumber: number}[]} parsed
+ * @param {{date: string, merchant: string, amountCents: number, rowNumber: number}[]} parsed
  *        `transactions` from parseStatementCsv
  * @param {{uid: string, importId: string, accountId?: string|null, accountType?: string|null}} ctx
  *        accountType ("credit" or "checking") helps spot card payments
@@ -64,8 +68,11 @@ function toTransactionDocs(parsed, { uid, importId, accountId = null, accountTyp
     userId: uid,
     date: dateToNoonUtc(t.date),
     merchant: t.merchant,
-    amount: t.amount,
-    ...categorizeByRules(t.merchant, t.amount, accountType),
+    amountCents: t.amountCents,
+    // TEMPORARY (Sprint 5 #6): dollars for the web app until it reads amountCents (#5/#7).
+    // Nothing on the server reads it. Remove once the migration (#8) has run.
+    amount: centsToDollars(t.amountCents),
+    ...categorizeByRules(t.merchant, t.amountCents, accountType),
     isUserCorrected: false,
     accountId: accountId || null,
     sourceStatementId: importId,

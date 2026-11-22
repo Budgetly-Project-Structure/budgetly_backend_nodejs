@@ -11,19 +11,19 @@ const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { parseStatementCsv, StatementParseError, parseDate, parseMoney } = require("../lib/csvParser");
+const { parseStatementCsv, StatementParseError, parseDate, parseCents } = require("../lib/csvParser");
 
 // How these tests are organized:
 //   - three real-looking statement files in test/fixtures/ (signed Amount column,
 //     Debit/Credit columns, and a deliberately messy file)
 //   - small inline CSVs for other layouts and edge cases
-//   - whole-file failures, size limits, then parseDate / parseMoney one value at a time
+//   - whole-file failures, size limits, then parseDate / parseCents one value at a time
 // Each describe() is a group; each test() is one check (63 in total).
 
 // fixture("x.csv") reads a test file as a Buffer, like the Cloud Function will get it from Storage.
-// sum() adds up amounts and rounds to cents, to compare with the known statement total.
+// sum() adds up amounts in cents (integers, so exact), to compare with the known statement total.
 const fixture = (name) => fs.readFileSync(path.join(__dirname, "fixtures", name));
-const sum = (txns) => Math.round(txns.reduce((s, t) => s + t.amount, 0) * 100) / 100;
+const sum = (txns) => txns.reduce((s, t) => s + t.amountCents, 0);
 
 describe("fixture: signed Amount column (checking_sept_2026.csv)", () => {
   const result = parseStatementCsv(fixture("checking_sept_2026.csv"));
@@ -38,15 +38,15 @@ describe("fixture: signed Amount column (checking_sept_2026.csv)", () => {
     assert.deepEqual(result.transactions[0], {
       date: "2026-09-01",
       merchant: "ACME CORP PAYROLL",
-      amount: 1850,
+      amountCents: 185000,
       rowNumber: 2,
     });
     const starbucks = result.transactions.find((t) => t.merchant === "Starbucks");
-    assert.equal(starbucks.amount, -6.45);
+    assert.equal(starbucks.amountCents, -645);
   });
 
   test("totals match the source data", () => {
-    assert.equal(sum(result.transactions), 2376.88);
+    assert.equal(sum(result.transactions), 237688);
   });
 
   test("reports which columns it used", () => {
@@ -67,9 +67,9 @@ describe("fixture: Debit / Credit columns (checking_aug_2026.csv)", () => {
   test("debits become negative, credits positive", () => {
     const payroll = result.transactions.find((t) => t.merchant === "ACME CORP PAYROLL");
     const electric = result.transactions.find((t) => t.merchant === "Evergy Electric");
-    assert.equal(payroll.amount, 1850);
-    assert.equal(electric.amount, -102);
-    assert.equal(sum(result.transactions), 2310.54);
+    assert.equal(payroll.amountCents, 185000);
+    assert.equal(electric.amountCents, -10200);
+    assert.equal(sum(result.transactions), 231054);
   });
 
   test("prefers Transaction Date over Posted Date", () => {
@@ -91,12 +91,12 @@ describe("fixture: messy file (messy.csv)", () => {
   test("keeps the good rows", () => {
     assert.equal(result.transactions.length, 4);
     assert.deepEqual(
-      result.transactions.map((t) => [t.date, t.merchant, t.amount]),
+      result.transactions.map((t) => [t.date, t.merchant, t.amountCents]),
       [
-        ["2026-09-01", "ACME CORP, PAYROLL", 1850],
-        ["2026-09-02", 'Joe\'s "Famous" Pizza', -24.5],
-        ["2026-09-03", "Netflix", -15.49],
-        ["2026-09-08", "Multi line memo", -9.99],
+        ["2026-09-01", "ACME CORP, PAYROLL", 185000],
+        ["2026-09-02", 'Joe\'s "Famous" Pizza', -2450],
+        ["2026-09-03", "Netflix", -1549],
+        ["2026-09-08", "Multi line memo", -999],
       ]
     );
   });
@@ -125,7 +125,7 @@ describe("other layouts", () => {
   test("semicolon-delimited", () => {
     const r = parseStatementCsv("Date;Description;Amount\n2026-09-01;Coffee;-4.50\n");
     assert.equal(r.meta.delimiter, ";");
-    assert.deepEqual(r.transactions[0], { date: "2026-09-01", merchant: "Coffee", amount: -4.5, rowNumber: 2 });
+    assert.deepEqual(r.transactions[0], { date: "2026-09-01", merchant: "Coffee", amountCents: -450, rowNumber: 2 });
   });
 
   test("tab-delimited", () => {
@@ -138,7 +138,7 @@ describe("other layouts", () => {
     const buf = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
     const r = parseStatementCsv(buf);
     assert.equal(r.transactions.length, 1);
-    assert.equal(r.transactions[0].amount, -4.5);
+    assert.equal(r.transactions[0].amountCents, -450);
   });
 
   test("works with a plain string and a last row with no trailing newline", () => {
@@ -154,19 +154,19 @@ describe("other layouts", () => {
       "09/03/2026,ATM,60.00,Withdrawal",
     ].join("\n");
     const r = parseStatementCsv(csv);
-    assert.deepEqual(r.transactions.map((t) => t.amount), [1850, -4.5, -60]);
+    assert.deepEqual(r.transactions.map((t) => t.amountCents), [185000, -450, -6000]);
   });
 
   test("a Type column is ignored when amounts already carry signs", () => {
     const csv = ["Date,Description,Amount,Type", "09/01/2026,Payroll,1850.00,ACH_CREDIT", "09/02/2026,Coffee,-4.50,DEBIT_CARD"].join("\n");
     const r = parseStatementCsv(csv);
-    assert.deepEqual(r.transactions.map((t) => t.amount), [1850, -4.5]);
+    assert.deepEqual(r.transactions.map((t) => t.amountCents), [185000, -450]);
   });
 
   test("invertSigns flips credit-card exports where purchases are positive", () => {
     const csv = "Date,Description,Amount\n09/01/2026,Coffee,4.50\n09/02/2026,Payment,-200.00\n";
     const r = parseStatementCsv(csv, { invertSigns: true });
-    assert.deepEqual(r.transactions.map((t) => t.amount), [-4.5, 200]);
+    assert.deepEqual(r.transactions.map((t) => t.amountCents), [-450, 20000]);
   });
 
   test("row with both a debit and a credit is rejected", () => {
@@ -177,7 +177,7 @@ describe("other layouts", () => {
 
   test("zero-dollar rows are kept", () => {
     const r = parseStatementCsv("Date,Description,Amount\n09/01/2026,Fee waived,0.00\n");
-    assert.equal(r.transactions[0].amount, 0);
+    assert.ok(Object.is(r.transactions[0].amountCents, 0), "0, not -0");
   });
 });
 
@@ -240,30 +240,44 @@ describe("parseDate", () => {
   }
 });
 
+// Integer cents read straight from the text (Sprint 5 #6).
 // null = empty cell (missing amount); NaN = something that isn't money
-describe("parseMoney", () => {
+describe("parseCents", () => {
   const cases = [
-    ["45.00", 45],
-    ["-45.00", -45],
-    ["+45", 45],
-    ["$1,234.56", 1234.56],
-    ["-$1,234.56", -1234.56],
-    ["(45.00)", -45],
-    ["45.00-", -45],
-    ["\u221245.00", -45], // unicode minus
-    ["45.00 DR", -45],
-    ["45.00 CR", 45],
-    [".5", 0.5],
-    ["0.1", 0.1],
-    ["19.999", 20],
+    ["45.00", 4500],
+    ["-45.00", -4500],
+    ["+45", 4500],
+    ["$1,234.56", 123456],
+    ["1,234.56", 123456],
+    ["-$1,234.56", -123456],
+    ["(45.00)", -4500],
+    ["($1,234.56)", -123456],
+    ["45.00-", -4500],
+    ["−45.00", -4500], // unicode minus
+    ["45.00 DR", -4500],
+    ["45.00 CR", 4500],
+    [".5", 50],
+    ["0.1", 10],
+    ["0.29", 29], // as a float, 0.29 * 100 is 28.999999999999996; read as text it's exactly 29
+    ["1.005", 101], // a third decimal rounds half away from zero
+    ["19.999", 2000],
+    ["12", 1200],
     ["", null],
     ["   ", null],
   ];
   for (const [input, expected] of cases) {
-    test(`"${input}" -> ${expected}`, () => assert.equal(parseMoney(input), expected));
+    test(`"${input}" -> ${expected}`, () => {
+      const cents = parseCents(input);
+      assert.equal(cents, expected);
+      if (expected !== null) assert.ok(Number.isInteger(cents), "always a whole number of cents");
+    });
   }
-  for (const bad of ["abc", "12.34.56", "$", "1,2,x"]) {
-    test(`"${bad}" -> NaN`, () => assert.ok(Number.isNaN(parseMoney(bad))));
+  test('"-0.00" and "(0.00)" are 0, not -0', () => {
+    assert.ok(Object.is(parseCents("-0.00"), 0));
+    assert.ok(Object.is(parseCents("(0.00)"), 0));
+  });
+  for (const bad of ["abc", "12.34.56", "$", "1,2,x", ".", "-"]) {
+    test(`"${bad}" -> NaN`, () => assert.ok(Number.isNaN(parseCents(bad))));
   }
 });
 

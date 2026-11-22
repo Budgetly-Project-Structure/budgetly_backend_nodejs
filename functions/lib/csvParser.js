@@ -14,14 +14,17 @@
  *   - accepts several date and money formats ($1,234.56, (45.00), 45.00-, ...)
  *   - never stops on one bad row: bad rows go in `errors`, good rows still parse
  *
- * Output convention (matches the data model): amount < 0 = spending,
- * amount > 0 = income.
+ * Output convention (matches the data model): amountCents is an integer number of
+ * cents, read straight from the text (lib/money.js, Sprint 5 #6); < 0 = spending,
+ * > 0 = income.
  *
  * Usage:
  *   const { parseStatementCsv } = require("./lib/csvParser");
  *   const { transactions, errors, errorCount } = parseStatementCsv(fileBuffer);
  */
 "use strict";
+
+const { parseCents } = require("./money");
 
 // --- Limits ----------------------------------------------------------------
 const MAX_DATA_ROWS = 10000; // sanity cap; a monthly statement is nowhere near this
@@ -217,29 +220,8 @@ function parseDate(raw) {
   return null;
 }
 
-/**
- * Parses a money cell to a number (rounded to cents).
- * Returns null for an empty cell and NaN for something that isn't money.
- * Accepts: 45.00, -45.00, +45, $1,234.56, (45.00), 45.00-, 45.00 CR, 45.00 DR
- * CR counts as positive and DR as negative.
- */
-function parseMoney(raw) {
-  let s = String(raw ?? "").trim();
-  if (s === "") return null;
-
-  let negative = false;
-  s = s.replace(/[\u2212\u2013\u2014]/g, "-"); // unicode minus / dashes -> "-"
-  if (/\s*CR$/i.test(s)) s = s.replace(/\s*CR$/i, "");
-  else if (/\s*DR$/i.test(s)) { negative = true; s = s.replace(/\s*DR$/i, ""); }
-  if (/^\(.*\)$/.test(s)) { negative = true; s = s.slice(1, -1); }
-  if (/-$/.test(s)) { negative = true; s = s.slice(0, -1); }
-  if (/^-/.test(s)) { negative = true; s = s.slice(1); }
-  s = s.replace(/^\+/, "").replace(/[$€£\s]/g, "").replace(/,/g, "");
-
-  if (!/^(\d+\.?\d*|\.\d+)$/.test(s)) return NaN;
-  const n = Math.round(parseFloat(s) * 100) / 100;
-  return negative ? -n : n;
-}
+// Money cells are read with parseCents (lib/money.js): integer cents, null for an
+// empty cell, NaN for something that isn't money.
 
 /** True if the cell shows an explicit minus sign, parentheses or DR. */
 function hasExplicitSign(raw) {
@@ -249,7 +231,7 @@ function hasExplicitSign(raw) {
 // --- Per-row logic ---------------------------------------------------------
 
 /**
- * Works out the signed amount for one row.
+ * Works out the signed amount for one row, in integer cents.
  * Throws an Error with a user-readable reason if the row has no usable amount.
  */
 function resolveAmount(cells, cols, ctx) {
@@ -257,8 +239,8 @@ function resolveAmount(cells, cols, ctx) {
 
   // Separate Debit / Credit columns: debit = money out, credit = money in
   if (cols.debit !== -1 || cols.credit !== -1) {
-    const debit = parseMoney(get(cols.debit));
-    const credit = parseMoney(get(cols.credit));
+    const debit = parseCents(get(cols.debit));
+    const credit = parseCents(get(cols.credit));
     if (Number.isNaN(debit) || Number.isNaN(credit)) throw new Error("amount isn't a valid number");
     const d = debit ? Math.abs(debit) : 0;
     const c = credit ? Math.abs(credit) : 0;
@@ -273,7 +255,7 @@ function resolveAmount(cells, cols, ctx) {
 
   // Single Amount column
   const raw = get(cols.amount);
-  const n = parseMoney(raw);
+  const n = parseCents(raw);
   if (n === null) throw new Error("missing amount");
   if (Number.isNaN(n)) throw new Error(`amount "${String(raw).trim()}" isn't a valid number`);
 
@@ -284,8 +266,8 @@ function resolveAmount(cells, cols, ctx) {
     if (/credit|^cr$|deposit/i.test(type)) return Math.abs(n);
   }
 
-  // Some credit cards export purchases as positive numbers
-  return ctx.invertSigns ? -n : n;
+  // Some credit cards export purchases as positive numbers (0 stays 0, not -0)
+  return ctx.invertSigns && n !== 0 ? -n : n;
 }
 
 // --- Main entry point ------------------------------------------------------
@@ -299,7 +281,7 @@ function resolveAmount(cells, cols, ctx) {
  *        Flip the sign of a single Amount column. Use for credit-card exports
  *        where purchases are positive (e.g. Amex, Discover).
  * @returns {{
- *   transactions: {date: string, merchant: string, amount: number, rowNumber: number}[],
+ *   transactions: {date: string, merchant: string, amountCents: number, rowNumber: number}[],
  *   errors: {row: number, reason: string}[],
  *   errorCount: number,
  *   totalRows: number,
@@ -383,14 +365,14 @@ function parseStatementCsv(input, options = {}) {
       continue;
     }
 
-    let amount;
+    let amountCents;
     try {
-      amount = resolveAmount(cells, cols, ctx);
+      amountCents = resolveAmount(cells, cols, ctx);
     } catch (err) {
       fail(line, err.message);
       continue;
     }
-    transactions.push({ date, merchant, amount, rowNumber: line });
+    transactions.push({ date, merchant, amountCents, rowNumber: line });
   }
 
   // Map field -> original header text, handy for debugging/logging
@@ -419,5 +401,5 @@ module.exports = {
   maskAccountNumbers, // also used by pdfParser.js
   // exported for unit tests
   parseDate,
-  parseMoney,
+  parseCents,
 };

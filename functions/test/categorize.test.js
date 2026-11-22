@@ -17,7 +17,8 @@ const { runCategorization } = require("../lib/categorizeJob");
 const silentLogger = { info() {}, warn() {}, error() {} };
 const UNCATEGORIZED = { category: "uncategorized", categoryConfidence: null, categorySource: "none" };
 
-const txn = (merchant, amount, date = "2026-09-02") => ({ merchant, amount, date });
+// Amounts are given in dollars for readability and stored in cents, like a transaction (Sprint 5 #6)
+const txn = (merchant, dollars, date = "2026-09-02") => ({ merchant, amountCents: Math.round(dollars * 100), date });
 
 /** A fake model: answers each transaction with `pick(transaction)` → [category, confidence]. */
 const fakeClassify = (pick, calls = []) => async (request) => {

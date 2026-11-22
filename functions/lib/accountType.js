@@ -31,7 +31,7 @@ const CARD_PAYMENT_IN = /payment\s*-?\s*thank\s*you|\bautopay\b|automatic paymen
 const CARD_PAYMENT_OUT = /\b(credit\s*crd|credit card|card)\b.*\b(payment|pymt|pmt|autopay|epay)\b|\b(capital one|discover|amex|american express|citi card)\b.*\b(payment|pymt|pmt|autopay|epay)\b/i;
 
 /**
- * @param {{transactions: {merchant: string, amount: number}[], meta?: Object}} parsed
+ * @param {{transactions: {merchant: string, amountCents: number}[], meta?: Object}} parsed
  *        what parseStatementCsv / parseStatementPdf return
  * @returns {{type: "checking"|"credit"|null, reasons: string[]}}
  */
@@ -46,22 +46,22 @@ function detectAccountType(parsed) {
     checking += 3;
     reasons.push("has a running balance");
   }
-  if (txns.some((t) => t.amount > 0 && PAYCHECK.test(t.merchant))) {
+  if (txns.some((t) => t.amountCents > 0 && PAYCHECK.test(t.merchant))) {
     checking += 3;
     reasons.push("a paycheck comes in");
   }
-  if (txns.some((t) => t.amount < 0 && CARD_PAYMENT_OUT.test(t.merchant))) {
+  if (txns.some((t) => t.amountCents < 0 && CARD_PAYMENT_OUT.test(t.merchant))) {
     checking += 2;
     reasons.push("pays a credit card");
   }
-  if (txns.some((t) => t.amount > 0 && CARD_PAYMENT_IN.test(t.merchant))) {
+  if (txns.some((t) => t.amountCents > 0 && CARD_PAYMENT_IN.test(t.merchant))) {
     credit += 3;
     reasons.push("receives a card payment");
   }
   // Card exports often list purchases as positive numbers in a single Amount column
   const cols = meta.columns ?? {};
   const singleAmountColumn = cols.amount && !cols.debit && !cols.credit;
-  if (singleAmountColumn && txns.length > 0 && txns.filter((t) => t.amount > 0).length > txns.length / 2) {
+  if (singleAmountColumn && txns.length > 0 && txns.filter((t) => t.amountCents > 0).length > txns.length / 2) {
     credit += 3;
     reasons.push("purchases are listed as positive amounts");
   }

@@ -22,8 +22,8 @@ const silentLogger = { info() {}, warn() {}, error() {} };
 // ---------------------------------------------------------------------------
 describe("toTransactionDocs", () => {
   const parsed = [
-    { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amount: 1850, rowNumber: 2 },
-    { date: "2026-09-02", merchant: "Starbucks", amount: -6.45, rowNumber: 3 },
+    { date: "2026-09-01", merchant: "ACME CORP PAYROLL", amountCents: 185000, rowNumber: 2 },
+    { date: "2026-09-02", merchant: "Starbucks", amountCents: -645, rowNumber: 3 },
   ];
   const docs = toTransactionDocs(parsed, { uid: "alice", importId: "imp123", accountId: "acct-checking" });
 
@@ -33,6 +33,8 @@ describe("toTransactionDocs", () => {
       userId: "alice",
       date: new Date("2026-09-02T12:00:00Z"),
       merchant: "Starbucks",
+      amountCents: -645,
+      // TEMPORARY dollars copy for the web app until it reads cents (Sprint 5 #5/#7)
       amount: -6.45,
       // Starbucks is on the free merchant keyword list (merchantRules.js)
       category: "dining",
@@ -114,7 +116,7 @@ describe("firestoreStore", () => {
   const stamp = () => "SERVER_TS";
   const makeDocs = (n, importId = "imp1") =>
     toTransactionDocs(
-      Array.from({ length: n }, (_, i) => ({ date: "2026-09-01", merchant: `M${i}`, amount: -1, rowNumber: i + 2 })),
+      Array.from({ length: n }, (_, i) => ({ date: "2026-09-01", merchant: `M${i}`, amountCents: -100, rowNumber: i + 2 })),
       { uid: "alice", importId }
     );
 
@@ -165,7 +167,7 @@ describe("firestoreStore", () => {
     const bob = createStore({ db, uid: "bob", importId: "imp1", serverTimestamp: stamp }); // same importId on purpose
     await alice.writeTransactions(makeDocs(4, "imp1"));
     await bob.writeTransactions(
-      toTransactionDocs([{ date: "2026-09-01", merchant: "BOBS", amount: -1, rowNumber: 2 }], { uid: "bob", importId: "imp1" })
+      toTransactionDocs([{ date: "2026-09-01", merchant: "BOBS", amountCents: -100, rowNumber: 2 }], { uid: "bob", importId: "imp1" })
     );
     assert.equal(db.data.size, 5);
     assert.equal(await alice.deleteTransactionBatch(), 4);

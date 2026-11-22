@@ -40,6 +40,14 @@ describe("findFlags", () => {
     assert.deepEqual(flags.map((f) => f.transactionId), ["a2"]);
   });
 
+  test("documents in cents (Sprint 5 #6) are checked the same way, and match older dollar ones", () => {
+    const cents = (id, amountCents, extra = {}) => txn(id, "alice", { amount: undefined, amountCents, ...extra });
+    const flags = findFlags([txn("a1", "alice"), cents("a2", -2000), cents("a3", -500000, { merchant: "CAR" })]);
+    assert.equal(flags.length, 2);
+    assert.match(flags[0].reason, /^duplicate of a1 .*-20\)$/);
+    assert.match(flags[1].reason, /large amount -5000 \(threshold 5000\)/);
+  });
+
   test("flags amounts at or above the threshold, spent or received", () => {
     const flags = findFlags([txn("a1", "alice", { amount: -5000 }), txn("a2", "alice", { amount: 7500, merchant: "PAYROLL" }), txn("a3", "alice", { amount: -4999.99, merchant: "X" })]);
     assert.deepEqual(flags.map((f) => f.transactionId), ["a1", "a2"]);

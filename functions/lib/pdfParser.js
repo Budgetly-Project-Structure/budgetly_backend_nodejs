@@ -5,7 +5,7 @@
  * parser produces, so the rest of the import pipeline doesn't care which one
  * it got:
  *
- *   { transactions: [{ date, merchant, amount, rowNumber }],
+ *   { transactions: [{ date, merchant, amountCents, rowNumber }],
  *     errors: [{ row, reason }], errorCount, totalRows, meta }
  *
  * How it works (two steps, so most of it can be tested without a real PDF):
@@ -37,8 +37,9 @@
  * only the last 4 digits of the statement's own account number are reported
  * (meta.accountLast4).
  *
- * Output convention (matches the data model): amount < 0 = spending,
- * amount > 0 = income.
+ * Output convention (matches the data model): amountCents is an integer number of
+ * cents, read straight from the text (lib/money.js, Sprint 5 #6); < 0 = spending,
+ * > 0 = income.
  *
  * Usage:
  *   const { parseStatementPdf } = require("./lib/pdfParser");
@@ -46,7 +47,8 @@
  */
 "use strict";
 
-const { StatementParseError, parseDate, parseMoney, maskAccountNumbers } = require("./csvParser");
+const { StatementParseError, parseDate, maskAccountNumbers } = require("./csvParser");
+const { parseCents } = require("./money");
 
 // --- Limits ----------------------------------------------------------------
 const MAX_PAGES = 100; // a monthly statement is a handful of pages
@@ -324,7 +326,7 @@ function parseLines(lines) {
     const text = words.map((w) => w.text).join(" ");
     if (/\b(beginning|opening|previous|starting)\s+balance\b/i.test(text)) {
       const money = words.filter((w) => MONEY_WORD.test(w.text)).pop();
-      if (money) prevBalance = Math.abs(parseMoney(money.text));
+      if (money) prevBalance = Math.abs(parseCents(money.text));
       hasBalance = true;
       return;
     }
@@ -383,7 +385,8 @@ function parseLines(lines) {
       balanceWord = moneyWords[moneyWords.length - 1];
     }
 
-    const balance = balanceWord ? Math.abs(parseMoney(balanceWord.text)) : null;
+    // Balances are in cents too, so comparing them below is exact
+    const balance = balanceWord ? Math.abs(parseCents(balanceWord.text)) : null;
 
     // A date followed only by a balance ("Sep 30  Ending balance  4,545.14") is not a transaction
     if (!amountWord) {
@@ -396,7 +399,7 @@ function parseLines(lines) {
       return;
     }
 
-    const printed = parseMoney(amountWord.text);
+    const printed = parseCents(amountWord.text);
     if (Number.isNaN(printed)) {
       fail(row, `amount "${amountWord.text}" isn't a valid amount`);
       return;
@@ -407,12 +410,12 @@ function parseLines(lines) {
     }
 
     // Income vs spending
-    let amount;
+    let amount; // integer cents
     if (columnSign !== 0) {
       amount = columnSign * Math.abs(printed);
     } else if (/[-−(]|DR$/i.test(amountWord.text) || /CR$/i.test(amountWord.text)) {
       amount = printed; // the number says which way it went: -45.00, (45.00), 45.00 DR, 45.00 CR
-    } else if (balance != null && prevBalance != null && Math.abs(Math.abs(balance - prevBalance) - printed) < 0.015) {
+    } else if (balance != null && prevBalance != null && Math.abs(Math.abs(balance - prevBalance) - printed) <= 1) {
       amount = balance - prevBalance > 0 ? printed : -printed; // unsigned: the balance moved up or down
     } else {
       amount = printed;
@@ -422,7 +425,7 @@ function parseLines(lines) {
     transactions.push({
       date,
       merchant: maskAccountNumbers(merchantRaw.replace(/\s+/g, " ")),
-      amount: Math.round(amount * 100) / 100,
+      amountCents: amount === 0 ? 0 : amount, // never -0
       rowNumber: row,
     });
   });

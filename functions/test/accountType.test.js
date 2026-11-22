@@ -123,7 +123,7 @@ describe("the import uses the detected type", () => {
     assert.equal(store.final().accountId, "acct-credit");
     // Purchases were positive in the file; read as a card statement they become spending
     const amazon = store.saved.find((t) => t.merchant.startsWith("AMAZON.COM*"));
-    assert.ok(amazon.amount < 0, `amazon amount ${amazon.amount}`);
+    assert.ok(amazon.amountCents < 0, `amazon amountCents ${amazon.amountCents}`);
     assert.ok(store.saved.every((t) => t.accountId === "acct-credit"));
   });
 

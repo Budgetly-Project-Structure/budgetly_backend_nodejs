@@ -26,8 +26,11 @@
  */
 "use strict";
 
+const { centsOf, centsToDollars } = require("../lib/money");
+
 // Documents read per page
 const PAGE_SIZE = 500;
+// In dollars (what an admin types); compared in cents
 const DEFAULT_THRESHOLD = 5000;
 
 /** The calendar day of a Firestore Timestamp, a Date or a "YYYY-MM-DD" string. */
@@ -38,15 +41,18 @@ function dayOf(date) {
   return d instanceof Date ? d.toISOString().slice(0, 10) : "";
 }
 
-/** Same user + same day + same merchant (ignoring case and extra spaces) + same amount. */
+/**
+ * Same user + same day + same merchant (ignoring case and extra spaces) + same amount in
+ * cents (Sprint 5 #6). centsOf also reads documents saved before amountCents existed.
+ */
 function duplicateKeyOf(t) {
   const merchant = String(t.merchant ?? "").trim().replace(/\s+/g, " ").toUpperCase();
-  return [t.userId, dayOf(t.date), merchant, Number(t.amount)].join("|");
+  return [t.userId, dayOf(t.date), merchant, centsOf(t)].join("|");
 }
 
 /**
  * Checks a list of transactions. Pure function, so it's easy to test.
- * @param {{id: string, userId: string, date: any, merchant: string, amount: number, deletedAt?: any}[]} txns
+ * @param {{id: string, userId: string, date: any, merchant: string, amountCents?: number, amount?: number, deletedAt?: any}[]} txns
  * @param {{threshold?: number}} [opts]
  * @returns {{userId: string, transactionId: string, reason: string}[]}
  */
@@ -55,14 +61,15 @@ function findFlags(txns, { threshold = DEFAULT_THRESHOLD } = {}) {
   const firstSeen = new Map(); // duplicate key -> id of the first transaction with it
   for (const t of txns) {
     if (t.deletedAt != null) continue;
+    const cents = centsOf(t);
     const key = duplicateKeyOf(t);
     if (firstSeen.has(key)) {
-      flags.push({ userId: t.userId, transactionId: t.id, reason: `duplicate of ${firstSeen.get(key)} (${dayOf(t.date)}, ${t.merchant}, ${t.amount})` });
+      flags.push({ userId: t.userId, transactionId: t.id, reason: `duplicate of ${firstSeen.get(key)} (${dayOf(t.date)}, ${t.merchant}, ${centsToDollars(cents)})` });
     } else {
       firstSeen.set(key, t.id);
     }
-    if (Math.abs(Number(t.amount)) >= threshold) {
-      flags.push({ userId: t.userId, transactionId: t.id, reason: `large amount ${t.amount} (threshold ${threshold})` });
+    if (cents != null && Math.abs(cents) >= Math.round(threshold * 100)) {
+      flags.push({ userId: t.userId, transactionId: t.id, reason: `large amount ${centsToDollars(cents)} (threshold ${threshold})` });
     }
   }
   return flags;
