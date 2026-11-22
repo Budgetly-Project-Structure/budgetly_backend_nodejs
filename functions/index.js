@@ -29,10 +29,12 @@
  * When a user sets or edits a transaction's category, remember it for that merchant
  * (users/{uid}/merchantCache, lib/merchantCache.js) so the next import reuses it.
  *
- * purgeDeleted (SCRUM-127)
- * Runs every day. Permanently removes manual transactions and budgets the user deleted
- * more than 30 days ago (their purgeAfter date has passed). Until then they sit in
- * "Recently deleted" and can be restored (lib/purgeJob.js).
+ * purgeDeleted (SCRUM-127, Sprint 5 #15)
+ * Runs every day. First backs up the whole database (a Firestore export to
+ * backups/YYYY-MM-DD/ in the default bucket, keeping 7 days; lib/backupJob.js), then
+ * permanently removes what users deleted more than 30 days ago (their purgeAfter date
+ * has passed). Until then it sits in "Recently deleted" and can be restored
+ * (lib/purgeJob.js). If the backup can't be started, the removal waits until tomorrow.
  *
  * categorizeTransactions (Claude, paid) is switched off: it lives in
  * aiFunctions.js, which this file doesn't load, so deploys stay free. See that
@@ -67,6 +69,7 @@ const { createAuditWriter } = require("./lib/auditLog");
 const { createImportCategorizer } = require("./lib/importCategorization");
 const { createMerchantCache, cacheUpdateFor } = require("./lib/merchantCache");
 const { runPurge } = require("./lib/purgeJob");
+const { runBackup, backupThenCleanup } = require("./lib/backupJob");
 
 // --- Setup -----------------------------------------------------------------
 // Runs once when the function starts, not on every upload
@@ -227,18 +230,39 @@ exports.onTransactionCategoryChanged = onDocumentWritten("transactions/{txnId}",
 });
 
 /**
- * Permanently removes soft-deleted transactions and budgets whose 30 days are up
- * (SCRUM-127), and deleted statements with their files (SCRUM-122, with an
- * "import.purged" audit entry). The app can only soft delete (the rules block real
- * deletes), so this is the only place data is really removed. Runs daily at 3 AM Central.
+ * Runs daily at 3 AM Central (the project's only scheduled job, so backups add no new
+ * Cloud Scheduler job):
+ *   1. Backup (Sprint 5 #15): starts a Firestore export of the whole default database
+ *      to gs://<default bucket>/backups/YYYY-MM-DD/ and deletes backups older than 7
+ *      days. If the export can't be started, step 2 is skipped today.
+ *   2. Permanently removes soft-deleted transactions and budgets whose 30 days are up
+ *      (SCRUM-127), and deleted statements with their files (SCRUM-122, with an
+ *      "import.purged" audit entry). The app can only soft delete (the rules block real
+ *      deletes), so this is the only place data is really removed.
  */
 exports.purgeDeleted = onSchedule(
   { schedule: "every day 03:00", timeZone: "America/Chicago", timeoutSeconds: 540 },
   async () => {
-    const result = await runPurge({
-      db,
-      deleteFile: (path) => getStorage().bucket().file(path).delete({ ignoreNotFound: true }),
-      writeAudit: createAuditWriter({ db }),
+    const result = await backupThenCleanup({
+      // Loaded only here, so the other functions don't pay for it on a cold start
+      backup: () => {
+        const { v1 } = require("@google-cloud/firestore");
+        return runBackup({
+          adminClient: new v1.FirestoreAdminClient(),
+          bucket: getStorage().bucket(),
+          // Set by Cloud Functions; FIREBASE_CONFIG is the fallback
+          projectId: process.env.GCLOUD_PROJECT || JSON.parse(process.env.FIREBASE_CONFIG || "{}").projectId,
+          logger,
+        });
+      },
+      cleanup: () =>
+        runPurge({
+          db,
+          deleteFile: (path) => getStorage().bucket().file(path).delete({ ignoreNotFound: true }),
+          writeAudit: createAuditWriter({ db }),
+          logger,
+        }),
+      emulator: process.env.FUNCTIONS_EMULATOR === "true",
       logger,
     });
     logger.info("purgeDeleted done", result);
