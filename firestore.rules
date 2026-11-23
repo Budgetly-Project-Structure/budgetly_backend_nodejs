@@ -47,7 +47,8 @@ service cloud.firestore {
     }
 
     // Soft delete and restore (data-framework.md). Instead of removing a document,
-    // the app sets three fields; the server removes it for good after purgeAfter.
+    // the app sets three fields; after purgeAfter the server moves it to the admin-only
+    // archive (Sprint 5 #12).
     // In the same write only these three (and updatedAt) may change.
     function onlyDeleteFieldsChange() {
       return request.resource.data.diff(resource.data).affectedKeys()
@@ -204,7 +205,7 @@ service cloud.firestore {
         && (isSoftDelete() || isRestore());
 
       // Never deleted from the app. Deleting is a soft delete (above); the server
-      // removes the doc for good after purgeAfter.
+      // moves the doc to the archive after purgeAfter (Sprint 5 #12).
       allow delete: if false;
     }
 
