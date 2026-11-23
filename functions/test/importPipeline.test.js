@@ -355,3 +355,44 @@ describe("processImport: timeouts (SCRUM-28)", () => {
     assert.equal(result.status, "completed");
   });
 });
+
+// ---------------------------------------------------------------------------
+describe("processImport: which account (SCRUM-166)", () => {
+  const withAccounts = (accounts) => {
+    const store = fakeStore();
+    store.findAccount = async (id) => accounts.find((a) => a.id === id) ?? null;
+    store.activeAccounts = async () => accounts.filter((a) => a.userId === "alice" && a.deletedAt == null);
+    return store;
+  };
+  const mine = (id, type) => ({ id, userId: "alice", type, deletedAt: null });
+  const file = () => fixture("checking_sept_2026.csv");
+
+  test("a picked account of the user's is saved on the import and every transaction", async () => {
+    const store = withAccounts([mine("a1", "checking")]);
+    const result = await run(store, { fileBuffer: file(), accountId: "a1" });
+    assert.equal(result.status, "completed");
+    assert.equal(store.updates.find((u) => "accountId" in u).accountId, "a1");
+    assert.ok(store.written.every((d) => d.accountId === "a1"));
+  });
+
+  test("someone else's account fails the import and saves nothing", async () => {
+    const store = withAccounts([{ id: "b1", userId: "bob", type: "checking", deletedAt: null }]);
+    const result = await run(store, { fileBuffer: file(), accountId: "b1" });
+    assert.equal(result.status, "failed");
+    assert.equal(store.written.length, 0);
+    assert.match(last(store).error, /isn't available any more/);
+  });
+
+  test("no account picked: the user's only checking account is used", async () => {
+    const store = withAccounts([mine("a1", "checking"), mine("k1", "credit")]);
+    await run(store, { fileBuffer: file(), accountId: null, accountType: "checking" });
+    assert.ok(store.written.length > 0 && store.written.every((d) => d.accountId === "a1"));
+  });
+
+  test("two checking accounts and none picked: saved without an account, not guessed", async () => {
+    const store = withAccounts([mine("a1", "checking"), mine("a2", "checking")]);
+    const result = await run(store, { fileBuffer: file(), accountId: null, accountType: "checking" });
+    assert.equal(result.status, "completed");
+    assert.ok(store.written.every((d) => d.accountId === null));
+  });
+});

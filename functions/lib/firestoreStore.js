@@ -20,6 +20,7 @@
  *   restoreTransactionBatch(fields) / restoreImportDoc()
  *                              undo that (SCRUM-121)
  *   existingTransactionCounts({accountId})  what earlier imports already saved, to skip duplicates (SCRUM-136)
+ *   findAccount(id) / activeAccounts()  the accounts an import can be filed under (SCRUM-166)
  */
 "use strict";
 
@@ -132,6 +133,18 @@ function createStore({ db, uid, importId, serverTimestamp = defaultServerTimesta
     /** Clears the delete fields on the import doc (SCRUM-121). */
     async restoreImportDoc() {
       await importRef.update({ deletedAt: null, deletedBy: null, purgeAfter: null, updatedAt: serverTimestamp() });
+    },
+
+    /** One account's data (SCRUM-166), or null. The caller checks it is this user's. */
+    async findAccount(accountId) {
+      const snap = await db.collection("accounts").doc(accountId).get();
+      return snap.exists ? { id: accountId, ...snap.data() } : null;
+    },
+
+    /** This user's accounts that aren't deleted (SCRUM-166). Equality filters only: no index needed. */
+    async activeAccounts() {
+      const snap = await db.collection("accounts").where("userId", "==", uid).where("deletedAt", "==", null).get();
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     },
 
     /**

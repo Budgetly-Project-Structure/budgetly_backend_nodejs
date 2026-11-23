@@ -37,7 +37,8 @@ const { parseStatementCsv, StatementParseError } = require("./csvParser");
 const { parseStatementPdf } = require("./pdfParser");
 const { toTransactionDocs } = require("./transactions");
 const { removeDuplicates } = require("./duplicates");
-const { detectAccountType, ACCOUNT_ID_FOR_TYPE } = require("./accountType");
+const { detectAccountType } = require("./accountType");
+const { resolveAccount } = require("./accounts");
 
 const UNSUPPORTED_TYPE = "This file type isn't supported. Please upload a CSV or PDF statement.";
 const NOTHING_READABLE = "We couldn't read any transactions from this file.";
@@ -88,10 +89,15 @@ async function runImport(
     // The import record keeps the account and what was detected; the type itself belongs to
     // the account, so it isn't saved again (data-duplication-audit.md, D4).
     const detected = detectAccountType(parsed);
-    const accountType = pickedType ?? detected.type;
-    const accountId = pickedAccountId ?? (accountType ? ACCOUNT_ID_FOR_TYPE[accountType] : null);
+    // Which account it goes to (SCRUM-166): the one picked if it is really the user's, else
+    // the user's only account of that type, else none (never a guess between several).
+    const resolved = await resolveAccount({
+      uid, pickedAccountId, pickedType, detectedType: detected.type, store,
+    });
+    if (!resolved.ok) return await fail(resolved.error);
+    const { accountId, accountType } = resolved;
     await store.update({ accountId, detectedAccountType: detected.type });
-    logger.info("Account type", { uid, importId, picked: pickedType, detected: detected.type, reasons: detected.reasons });
+    logger.info("Account type", { uid, importId, accountId, picked: pickedType, detected: detected.type, reasons: detected.reasons });
     // Many card exports list purchases as positive numbers. On a credit account with one
     // Amount column where most rows are positive, read it again with the signs flipped.
     if (fileType === "csv" && accountType === "credit" && purchasesLookPositive(parsed)) {
