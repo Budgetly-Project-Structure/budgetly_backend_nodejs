@@ -212,6 +212,39 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Accounts (SCRUM-167, budgetly_contracts schemas/data-model.md): the user's own bank accounts
+    // and credit cards, one top-level document each with the owner in userId. Transactions and
+    // statements keep only the account's id. Like transactions, a query must include
+    // where("userId", "==", <own uid>).
+    // New: the owner's own userId, a type of checking or credit, an institution of 1-60
+    // characters, last4 empty or exactly 4 digits (never the full number), a nickname of
+    // up to 40 characters, and deletedAt null.
+    // Changing: only institution, last4 and nickname. userId and type never change.
+    // Removing is a soft delete (and restore), never a real delete, the same as budgets.
+    function isValidAccount(d) {
+      return d.type in ['checking', 'credit']
+        && d.institution is string && d.institution.size() > 0 && d.institution.size() <= 60
+        && (!('last4' in d) || d.last4 == null || (d.last4 is string && d.last4.matches('^[0-9]{4}$')))
+        && (!('nickname' in d) || d.nickname == null || (d.nickname is string && d.nickname.size() <= 40));
+    }
+    match /accounts/{accountId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly(['userId','type','institution','last4','nickname',
+                                                  'createdAt','updatedAt','deletedAt','deletedBy','purgeAfter'])
+        && request.resource.data.keys().hasAll(['userId','type','institution','deletedAt'])
+        && request.resource.data.userId == request.auth.uid
+        && isValidAccount(request.resource.data)
+        && request.resource.data.deletedAt == null;
+      allow update: if request.auth != null && resource.data.userId == request.auth.uid
+        && ((isActive()
+             && request.resource.data.diff(resource.data).affectedKeys()
+                  .hasOnly(['institution','last4','nickname','updatedAt'])
+             && isValidAccount(request.resource.data))
+            || isSoftDelete() || isRestore());
+      allow delete: if false;
+    }
+
     // Audit log (SCRUM-120): one entry per delete, restore... written only by Cloud
     // Functions (Admin SDK). The owner can read their own entries; nobody can write,
     // change or remove them from the app. Like transactions, a query must include
@@ -239,6 +272,10 @@ service cloud.firestore {
       allow read, write: if false;
     }
     match /archive_budgets/{docId} {
+      allow read, write: if false;
+    }
+    // archive_accounts/{uid}_{accountId}: an account (SCRUM-167), same rules
+    match /archive_accounts/{docId} {
       allow read, write: if false;
     }
     // Anything not matched above is denied by default.

@@ -759,3 +759,156 @@ describe('Firestore security rules: monthly budget (SCRUM-137)', () => {
     await assertFails(getDoc(marker(env.unauthenticatedContext().firestore(), 'alice')));
   });
 });
+
+// SCRUM-167: the user's own bank accounts and credit cards (top-level accounts collection)
+describe('Firestore security rules: accounts (SCRUM-167)', () => {
+  const acct = (db, id = 'a1') => doc(db, `accounts/${id}`);
+  const DAY = 24 * 60 * 60 * 1000;
+  // A valid new account, as the web app writes it
+  const account = (extra = {}) => ({
+    userId: 'alice',
+    type: 'checking',
+    institution: 'Chase',
+    last4: '4521',
+    nickname: 'Joint checking',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    deletedAt: null,
+    deletedBy: null,
+    purgeAfter: null,
+    ...extra,
+  });
+  const seed = (extra = {}) =>
+    env.withSecurityRulesDisabled((ctx) => setDoc(acct(ctx.firestore()), account({ createdAt: Timestamp.now(), updatedAt: Timestamp.now(), ...extra })));
+  const softDelete = (by = 'alice') => ({
+    deletedAt: serverTimestamp(),
+    deletedBy: by,
+    purgeAfter: Timestamp.fromMillis(Date.now() + 30 * DAY),
+    updatedAt: serverTimestamp(),
+  });
+
+  describe('creating', () => {
+    it('owner can add an account, with or without last4 and a nickname', async () => {
+      await assertSucceeds(setDoc(acct(alice(), 'a1'), account()));
+      await assertSucceeds(setDoc(acct(alice(), 'a2'), account({ type: 'credit', last4: null, nickname: null })));
+      const { last4, nickname, ...bare } = account();
+      await assertSucceeds(setDoc(acct(alice(), 'a3'), bare));
+    });
+
+    it("cannot add one for someone else, or while signed out", async () => {
+      await assertFails(setDoc(acct(alice()), account({ userId: 'bob' })));
+      await assertFails(setDoc(acct(bob()), account()));
+      await assertFails(setDoc(acct(env.unauthenticatedContext().firestore()), account()));
+    });
+
+    it('type must be checking or credit', async () => {
+      await assertFails(setDoc(acct(alice()), account({ type: 'savings' })));
+      const { type, ...noType } = account();
+      await assertFails(setDoc(acct(alice()), noType));
+    });
+
+    it('institution is 1-60 characters', async () => {
+      await assertFails(setDoc(acct(alice()), account({ institution: '' })));
+      await assertFails(setDoc(acct(alice()), account({ institution: 'x'.repeat(61) })));
+      await assertSucceeds(setDoc(acct(alice()), account({ institution: 'x'.repeat(60) })));
+    });
+
+    it('last4 is exactly 4 digits: never a full account number', async () => {
+      await assertFails(setDoc(acct(alice()), account({ last4: '123' })));
+      await assertFails(setDoc(acct(alice()), account({ last4: '12345' })));
+      await assertFails(setDoc(acct(alice()), account({ last4: '12a4' })));
+      await assertFails(setDoc(acct(alice()), account({ last4: 4521 })));
+      await assertFails(setDoc(acct(alice()), account({ last4: '123456789012' })));
+    });
+
+    it('nickname is at most 40 characters', async () => {
+      await assertSucceeds(setDoc(acct(alice(), 'n1'), account({ nickname: 'x'.repeat(40) })));
+      await assertFails(setDoc(acct(alice(), 'n2'), account({ nickname: 'x'.repeat(41) })));
+    });
+
+    it('must start not deleted, with no extra fields', async () => {
+      await assertFails(setDoc(acct(alice()), account({ deletedAt: serverTimestamp() })));
+      const { deletedAt, ...noDeletedAt } = account();
+      await assertFails(setDoc(acct(alice()), noDeletedAt));
+      await assertFails(setDoc(acct(alice()), account({ balance: 100 })));
+    });
+  });
+
+  describe('reading', () => {
+    it('owner can read it, and list their own with a userId filter', async () => {
+      await seed();
+      await assertSucceeds(getDoc(acct(alice())));
+      await assertSucceeds(getDocs(query(collection(alice(), 'accounts'), where('userId', '==', 'alice'))));
+    });
+
+    it("others can't read it, and a list without the userId filter is refused", async () => {
+      await seed();
+      await assertFails(getDoc(acct(bob())));
+      await assertFails(getDoc(acct(env.unauthenticatedContext().firestore())));
+      await assertFails(getDocs(collection(alice(), 'accounts')));
+      await assertFails(getDocs(query(collection(bob(), 'accounts'), where('userId', '==', 'alice'))));
+    });
+  });
+
+  describe('changing', () => {
+    it('owner can change institution, last4 and nickname', async () => {
+      await seed();
+      await assertSucceeds(updateDoc(acct(alice()), { institution: 'Chase Bank', last4: '9999', nickname: null, updatedAt: serverTimestamp() }));
+    });
+
+    it('userId and type never change', async () => {
+      await seed();
+      await assertFails(updateDoc(acct(alice()), { userId: 'bob' }));
+      await assertFails(updateDoc(acct(bob()), { userId: 'bob' }));
+      await assertFails(updateDoc(acct(alice()), { type: 'credit' }));
+    });
+
+    it('a changed value must still be valid', async () => {
+      await seed();
+      await assertFails(updateDoc(acct(alice()), { last4: '12' }));
+      await assertFails(updateDoc(acct(alice()), { institution: '' }));
+      await assertFails(updateDoc(acct(alice()), { nickname: 'x'.repeat(41) }));
+    });
+
+    it("someone else can't change it", async () => {
+      await seed();
+      await assertFails(updateDoc(acct(bob()), { institution: 'Hacked' }));
+    });
+
+    it("a deleted account can't be edited, only restored", async () => {
+      await seed({ deletedAt: Timestamp.now(), deletedBy: 'alice', purgeAfter: Timestamp.fromMillis(Date.now() + 29 * DAY) });
+      await assertFails(updateDoc(acct(alice()), { institution: 'New name' }));
+      await assertSucceeds(updateDoc(acct(alice()), { deletedAt: null, deletedBy: null, purgeAfter: null, updatedAt: serverTimestamp() }));
+    });
+  });
+
+  describe('removing', () => {
+    it('hard delete is denied', async () => {
+      await seed();
+      await assertFails(deleteDoc(acct(alice())));
+    });
+
+    it('owner can soft delete, and only with all three fields set properly', async () => {
+      await seed();
+      await assertSucceeds(updateDoc(acct(alice()), softDelete()));
+    });
+
+    it('deletedBy as someone else, a past purgeAfter, or other fields in the same write are denied', async () => {
+      await seed();
+      await assertFails(updateDoc(acct(alice()), softDelete('bob')));
+      await assertFails(updateDoc(acct(alice()), { ...softDelete(), purgeAfter: Timestamp.fromMillis(Date.now() - DAY) }));
+      await assertFails(updateDoc(acct(alice()), { ...softDelete(), institution: 'Changed' }));
+    });
+
+    it("can't soft delete someone else's account", async () => {
+      await seed();
+      await assertFails(updateDoc(acct(bob()), softDelete('bob')));
+    });
+  });
+
+  it('the archive for accounts is closed to everyone, the owner too', async () => {
+    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'archive_accounts/alice_a1'), { userId: 'alice', type: 'checking' }));
+    await assertFails(getDoc(doc(alice(), 'archive_accounts/alice_a1')));
+    await assertFails(setDoc(doc(alice(), 'archive_accounts/alice_a2'), { userId: 'alice' }));
+  });
+});
