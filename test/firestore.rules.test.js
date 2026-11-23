@@ -16,7 +16,7 @@
  * and unauthenticatedContext() is someone not logged in.
  */
 const { initializeTestEnvironment, assertFails, assertSucceeds } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, getDocs, getCountFromServer, setDoc, updateDoc, deleteDoc, collection, query, where, Timestamp, serverTimestamp } = require('firebase/firestore');
+const { doc, getDoc, getDocs, getCountFromServer, setDoc, updateDoc, deleteDoc, deleteField, collection, query, where, Timestamp, serverTimestamp } = require('firebase/firestore');
 const fs = require('fs');
 
 // The test environment: an emulator connection that loads our real rules file
@@ -111,6 +111,36 @@ describe('Firestore security rules: budgets', () => {
     await assertFails(setDoc(budget(alice()), { categoryId: 'groceries', limit: 250 }));
     await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, note: 'x' }));
   });
+
+  // Limits in whole cents (SCRUM-148): the old dollar `limit` still works until #151/#152
+  describe('limit in cents (SCRUM-148)', () => {
+    it('owner can save a limit as whole cents', async () => {
+      await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 25000 }));
+      await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 25050, source: 'user' }));
+    });
+
+    it('a limit of 0 cents is allowed', () =>
+      assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 0 })));
+
+    it('limitCents must be a whole number, not negative, and not text', async () => {
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 250.5 }));
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limitCents: -100 }));
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limitCents: '25000' }));
+    });
+
+    it('a budget needs a limit: limitCents or the old limit', async () => {
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining' }));
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', source: 'user' }));
+    });
+
+    it('the old dollar limit is still accepted for now, but it must still be valid', async () => {
+      await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250.5 }));
+      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: -1, limitCents: 25000 }));
+    });
+
+    it("another user can't save a limit in cents on someone else's budget", () =>
+      assertFails(setDoc(budget(bob(), 'alice'), { categoryId: 'dining', limitCents: 25000 })));
+  });
 });
 
 describe('Firestore security rules: profile and settings (SCRUM-88)', () => {
@@ -203,6 +233,46 @@ describe('Firestore security rules: manual transactions', () => {
     await assertFails(setDoc(txn(alice()), manual({ merchant: 'x'.repeat(101) })));
     await assertFails(setDoc(txn(alice()), manual({ date: '2026-10-15' })));
     await assertFails(setDoc(txn(alice()), manual({ note: 'extra' })));
+  });
+
+  describe('amount in cents (SCRUM-150)', () => {
+    // A manual transaction as the web app now writes it: amountCents, no dollar amount
+    const cents = (extra = {}) => {
+      const { amount, ...rest } = manual();
+      return { ...rest, amountCents: -2350, ...extra };
+    };
+
+    it('accepts whole cents, spending or income', async () => {
+      await assertSucceeds(setDoc(txn(alice(), 'c1'), cents()));
+      await assertSucceeds(setDoc(txn(alice(), 'c2'), cents({ amountCents: 185000 })));
+    });
+
+    it('rejects zero, fractions and text', async () => {
+      await assertFails(setDoc(txn(alice()), cents({ amountCents: 0 })));
+      await assertFails(setDoc(txn(alice()), cents({ amountCents: -23.5 })));
+      await assertFails(setDoc(txn(alice()), cents({ amountCents: '2350' })));
+    });
+
+    it('rejects a transaction with no amount at all', async () => {
+      const { amountCents, ...none } = cents();
+      await assertFails(setDoc(txn(alice()), none));
+    });
+
+    it('still accepts the old dollar amount, but not an invalid one', async () => {
+      await assertSucceeds(setDoc(txn(alice(), 'old'), manual()));
+      await assertFails(setDoc(txn(alice()), manual({ amount: 0 })));
+    });
+
+    it('owner can edit to cents and drop the old dollar field', async () => {
+      await seed(); // seeded with the old `amount`
+      await assertSucceeds(updateDoc(txn(alice()), { amountCents: -3000, amount: deleteField(), merchant: 'Aldi' }));
+    });
+
+    it('editing to a bad cents value is rejected', async () => {
+      await seed();
+      await assertFails(updateDoc(txn(alice()), { amountCents: -30.5 }));
+      await assertFails(updateDoc(txn(bob()), { amountCents: -3000 }));
+    });
   });
 
   it('owner can edit a manual transaction', async () => {
