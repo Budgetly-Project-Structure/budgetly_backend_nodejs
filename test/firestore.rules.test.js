@@ -112,6 +112,13 @@ describe('Firestore security rules: budgets', () => {
     await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, note: 'x' }));
   });
 
+  // The document id is the category (SCRUM-146): categoryId is no longer saved
+  it('a budget without categoryId is fine; a wrong categoryId is still refused', async () => {
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 25000, source: 'user' }));
+    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 25000 }));
+    await assertFails(setDoc(budget(alice()), { categoryId: 'groceries', limitCents: 25000 }));
+  });
+
   // Limits in whole cents (SCRUM-148): the old dollar `limit` still works until #151/#152
   describe('limit in cents (SCRUM-148)', () => {
     it('owner can save a limit as whole cents', async () => {
@@ -219,6 +226,11 @@ describe('Firestore security rules: manual transactions', () => {
 
   it('owner can add a manual transaction', () =>
     assertSucceeds(setDoc(txn(alice()), manual())));
+
+  it('isUserCorrected is no longer needed (SCRUM-146): a manual transaction without it is fine', async () => {
+    const { isUserCorrected, ...without } = manual();
+    await assertSucceeds(setDoc(txn(alice()), without));
+  });
 
   it('cannot add one for someone else, or marked as imported', async () => {
     await assertFails(setDoc(txn(alice()), manual({ userId: 'bob' })));
@@ -725,6 +737,12 @@ describe('Firestore security rules: monthly budget (SCRUM-137)', () => {
     await assertFails(updateDoc(marker(alice()), { auto: false }));
     await assertFails(updateDoc(marker(alice()), { savings: -5 }));
     await assertFails(deleteDoc(marker(alice())));
+  });
+
+  it('the month is the document id: the record can leave month out, but not contradict it (SCRUM-146)', async () => {
+    const { month, ...noMonth } = record();
+    await assertSucceeds(setDoc(marker(alice()), noMonth));
+    await assertFails(setDoc(marker(alice(), 'alice', '2026-12'), record({ month: '2026-11' })));
   });
 
   it('the record must match its month and have the right shape', async () => {

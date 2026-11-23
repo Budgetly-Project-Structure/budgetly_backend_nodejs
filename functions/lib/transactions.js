@@ -21,7 +21,6 @@
  *     categorySource    "rule" for a rule match, otherwise "none" until categorized;
  *                       the Firestore rules only let the owner change a category
  *                       when this is set to "user"
- *     isUserCorrected   false
  *     accountId         which account the statement belongs to, or null
  *     sourceStatementId the import doc this transaction came from (the "statementId")
  *     source            "import" (manual transactions are added by the web app)
@@ -73,7 +72,6 @@ function toTransactionDocs(parsed, { uid, importId, accountId = null, accountTyp
     // Nothing on the server reads it. Remove once the migration (#8) has run.
     amount: centsToDollars(t.amountCents),
     ...categorizeByRules(t.merchant, t.amountCents, accountType),
-    isUserCorrected: false,
     accountId: accountId || null,
     sourceStatementId: importId,
     source: "import",

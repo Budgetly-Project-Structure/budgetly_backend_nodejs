@@ -116,7 +116,9 @@ service cloud.firestore {
         allow create, update: if isOwner(uid)
           && (resource == null || isActive())
           && request.resource.data.keys().hasOnly(['categoryId','limit','limitCents','source','updatedAt'])
-          && request.resource.data.categoryId == categoryId
+          // categoryId is the document id, so it is no longer saved (SCRUM-146). An older
+          // document that still has it must match the id.
+          && (!('categoryId' in request.resource.data) || request.resource.data.categoryId == categoryId)
           && ('limitCents' in request.resource.data || 'limit' in request.resource.data)
           && (!('limitCents' in request.resource.data)
               || (request.resource.data.limitCents is int && request.resource.data.limitCents >= 0))
@@ -136,7 +138,9 @@ service cloud.firestore {
         allow read: if isOwner(uid);
         allow create: if isOwner(uid)
           && request.resource.data.keys().hasOnly(['month','auto','savings','createdAt'])
-          && request.resource.data.month == month
+          // month is the document id, so it is no longer saved (SCRUM-146). If it's
+          // sent anyway it must match the id.
+          && (!('month' in request.resource.data) || request.resource.data.month == month)
           && month.matches('^[0-9]{4}-[0-9]{2}$')
           && request.resource.data.auto is bool
           && request.resource.data.savings is number
@@ -169,6 +173,8 @@ service cloud.firestore {
       // where("userId", "==", <own uid>) or Firestore rejects the whole query.
       allow read: if isTxnOwner();
 
+      // isUserCorrected is no longer saved (SCRUM-146: categorySource == 'user' says the same
+      // thing), but it stays in the allowed list so older clients and documents still work.
       // Adding a manual transaction. Imported ones are written by Cloud Functions
       // (Admin SDK bypasses rules). userId must be the caller's own uid, and new
       // docs start out not deleted (deletedAt == null).
