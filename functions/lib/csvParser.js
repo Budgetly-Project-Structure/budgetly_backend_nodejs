@@ -388,11 +388,26 @@ function parseStatementCsv(input, options = {}) {
   };
 }
 
-/** Masks anything that looks like an account or card number: 8+ digits, possibly grouped with spaces or dashes. */
+/**
+ * Masks anything that looks like an account or card number: 8+ digits, possibly grouped with
+ * spaces or dashes. Only the last 4 digits are kept.
+ *
+ * One exception (SCRUM-168): a bank's sequence number followed by a short number and a space, like
+ * "ATM WITHDRAWAL 000412 1420 E BATTLEFIELD" (6 digits, then a street number), is not one account
+ * number. Such a pair isn't joined, so the street number stays readable and the row matches the
+ * same statement imported as a PDF. A group of 8+ digits on its own is still masked.
+ */
 function maskAccountNumbers(text) {
-  return String(text).replace(/(?<![\d/.,])\d(?:[ -]?\d){7,}(?![\d/])/g, (run) =>
-    /^\d{4}-\d{2}-\d{2}$/.test(run) ? run : `••••${run.replace(/\D/g, "").slice(-4)}` // leave ISO dates alone
-  );
+  const mask = (digits) => `••••${digits.slice(-4)}`;
+  return String(text).replace(/(?<![\d/.,])\d(?:[ -]?\d){7,}(?![\d/])/g, (run) => {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(run)) return run; // leave ISO dates alone
+    const groups = run.split(/[ -]/);
+    const spaced = / /.test(run) && !/-/.test(run);
+    if (spaced && groups.length === 2 && groups[0].length >= 6 && groups[1].length <= 5) {
+      return groups.map((g) => (g.length >= 8 ? mask(g) : g)).join(" ");
+    }
+    return mask(run.replace(/\D/g, ""));
+  });
 }
 
 module.exports = {

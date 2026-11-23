@@ -298,3 +298,28 @@ describe("account numbers in merchant names are masked", () => {
     ]);
   });
 });
+
+describe("an ATM sequence number is not an account number (SCRUM-168)", () => {
+  const { maskAccountNumbers } = require("../lib/csvParser");
+  const { duplicateKey } = require("../lib/duplicates");
+
+  test("the street number after a 6-digit sequence number stays readable", () => {
+    assert.equal(maskAccountNumbers("ATM WITHDRAWAL 000412 1420 E BATTLEFIELD"), "ATM WITHDRAWAL 000412 1420 E BATTLEFIELD");
+  });
+
+  test("so the CSV row matches the same row in the PDF", () => {
+    const day = new Date("2026-10-05T12:00:00Z");
+    const csv = { date: day, amountCents: -6000, merchant: maskAccountNumbers("ATM WITHDRAWAL 000412 1420 E BATTLEFIELD"), accountId: "a" };
+    const pdf = { date: day, amountCents: -6000, merchant: "ATM WITHDRAWAL 1420 E BATTLEFIELD", accountId: "a" };
+    assert.equal(duplicateKey(csv), duplicateKey(pdf));
+  });
+
+  test("real account and card numbers are still masked, grouped or not", () => {
+    assert.equal(maskAccountNumbers("Acct 000987654321"), "Acct ••••4321");
+    assert.equal(maskAccountNumbers("Card 4111 1111 1111 1111"), "Card ••••1111");
+    assert.equal(maskAccountNumbers("Acct 0012-4521-3788 done"), "Acct ••••3788 done");
+    assert.equal(maskAccountNumbers("TRANSFER 4111 1111"), "TRANSFER ••••1111");
+    assert.equal(maskAccountNumbers("ACH 9100236411 12"), "ACH ••••6411 12"); // a long number is masked on its own
+    assert.equal(maskAccountNumbers("PPD ID: 9100236411"), "PPD ID: ••••6411");
+  });
+});
