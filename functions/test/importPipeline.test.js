@@ -40,7 +40,6 @@ describe("toTransactionDocs", () => {
       category: "dining",
       categoryConfidence: 0.9,
       categorySource: "rule",
-      isUserCorrected: false,
       accountId: "acct-checking",
       sourceStatementId: "imp123",
       source: "import",
