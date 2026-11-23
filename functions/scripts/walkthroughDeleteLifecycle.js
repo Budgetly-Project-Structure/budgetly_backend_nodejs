@@ -9,8 +9,10 @@
  *   3. it shows in Recently deleted
  *   4. Restore (restoreImport) -> back to normal, audit entry
  *   5. another user can't see it or restore it
- *   6. Delete again, let 30 days pass, run the daily purge -> transactions, record and
- *      file are gone for good, with an "import.purged" audit entry (SCRUM-122)
+ *   6. Delete again, let 30 days pass, run the daily job -> the record, its transactions
+ *      and its file move to the admin-only archive (archive_imports, archive_transactions,
+ *      archive/ in Storage), intact, with an "import.archived" audit entry (Sprint 5 #12);
+ *      an expired manual transaction and budget move to the archive too
  *
  * It never touches the real project: everything runs on the "demo-budgetly"
  * emulators, which start empty and are thrown away afterwards.
@@ -38,7 +40,7 @@ if (!process.env.FIRESTORE_EMULATOR_HOST || !process.env.FIREBASE_STORAGE_EMULAT
 const { initializeApp } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
-const { runPurge } = require("../lib/purgeJob");
+const { runArchive } = require("../lib/purgeJob");
 const { restoreImport } = require("../lib/restoreImport");
 const { createStore } = require("../lib/firestoreStore");
 const { createAuditWriter } = require("../lib/auditLog");
@@ -168,7 +170,7 @@ async function main() {
   check(c.deleted === expected, "alice's statement is still deleted (Bob changed nothing)");
 
   // 6. 30 days later: purge ----------------------------------------------------------
-  step("6. 30 days pass; the daily purge runs (purgeDeleted's runPurge, called directly)");
+  step("6. 30 days pass; the daily job archives it (purgeDeleted's runArchive, called directly)");
   const later = new Date(Date.now() + 31 * DAY);
   const tooLate = await restoreImport({
     uid: alice.uid,
@@ -179,23 +181,64 @@ async function main() {
     logger: { info() {}, warn() {}, error() {} },
   }).catch((e) => e);
   check(tooLate?.code === "failed-precondition", "restoring after 30 days is refused", tooLate?.message);
-  // The same wiring as purgeDeleted in index.js
+  // Something else Alice deleted more than 30 days ago: a manual transaction and a budget
+  const longAgo = { deletedAt: new Date(Date.now() - DAY), deletedBy: alice.uid, purgeAfter: new Date(Date.now() + 29 * DAY) };
+  const manualRef = db.collection("transactions").doc();
+  await manualRef.set({ userId: alice.uid, source: "manual", merchant: "Farmers market", amountCents: -1200, amount: -12, category: "groceries", categorySource: "user", date: new Date(), ...longAgo });
+  const budgetRef = db.doc(`users/${alice.uid}/budgets/dining`);
+  await budgetRef.set({ categoryId: "dining", limitCents: 25000, limit: 250, source: "user", ...longAgo });
+  const before = await txnCounts(alice.uid, importId);
+  const originalAmounts = new Map(before.docs.map((d) => [d.id, d.get("amountCents")]));
+
+  // The same wiring as purgeDeleted in index.js (storageFiles)
   const quiet = { info() {}, warn() {}, error() {} };
-  const purgeDeps = { db, now: later, writeAudit: createAuditWriter({ db }), logger: quiet };
-  const purged = await runPurge({ ...purgeDeps, deleteFile: (filePath) => bucket.file(filePath).delete({ ignoreNotFound: true }) });
-  // The statement goes first and removes its own transactions (counted in its audit entry,
-  // checked below), so the transaction sweep has none of them left (Sprint 5 #2)
-  check(purged.imports === 1 && purged.transactions === 0, "purge removed the statement (with its transactions)", JSON.stringify(purged));
+  const files = {
+    exists: async (p) => (await bucket.file(p).exists())[0],
+    copy: async (from, to) => { await bucket.file(from).copy(bucket.file(to)); },
+    remove: async (p) => { await bucket.file(p).delete({ ignoreNotFound: true }); },
+  };
+  const deps = { db, now: later, files, writeAudit: createAuditWriter({ db }), logger: quiet };
+  const archived = await runArchive(deps);
+  check(
+    archived.imports === 1 && archived.transactions === 1 && archived.budgets === 1,
+    "the daily job archived the statement (with its transactions), the manual transaction and the budget",
+    JSON.stringify(archived)
+  );
+
+  // Gone from the live data
   c = await txnCounts(alice.uid, importId);
-  check(c.total === 0, "no transactions from that statement are left", `${c.total} left`);
-  check(!(await db.doc(`users/${alice.uid}/imports/${importId}`).get()).exists, "the import record is gone");
-  check(!(await fileExists(storagePath)), "the statement file is gone from Storage");
+  check(c.total === 0, "no transactions from that statement are left in transactions/", `${c.total} left`);
+  check(!(await db.doc(`users/${alice.uid}/imports/${importId}`).get()).exists, "the import record is gone from users/{uid}/imports");
+  check(!(await manualRef.get()).exists && !(await budgetRef.get()).exists, "the manual transaction and the budget are gone from the live data");
+
+  // In the archive, intact
+  const archImp = await db.doc(`archive_imports/${alice.uid}_${importId}`).get();
+  const archivedFile = `archive/${storagePath}`;
+  check(
+    archImp.exists && archImp.get("userId") === alice.uid && archImp.get("originalPath") === `users/${alice.uid}/imports/${importId}`
+      && archImp.get("archivedAt") != null && archImp.get("archivedFilePath") === archivedFile && archImp.get("storagePath") === storagePath,
+    "archive_imports has the record with all its fields, userId, originalPath, archivedAt and archivedFilePath"
+  );
+  const archTxns = await db.getAll(...[...originalAmounts.keys()].map((id) => db.doc(`archive_transactions/${id}`)));
+  check(
+    archTxns.length === expected
+      && archTxns.every((d) => d.exists && d.get("userId") === alice.uid && d.get("originalPath") === `transactions/${d.id}` && d.get("amountCents") === originalAmounts.get(d.id)),
+    `all ${expected} transactions are in archive_transactions, amounts unchanged`
+  );
+  const archManual = await db.doc(`archive_transactions/${manualRef.id}`).get();
+  const archBudget = await db.doc(`archive_budgets/${alice.uid}_dining`).get();
+  check(archManual.get("amountCents") === -1200 && archBudget.get("limitCents") === 25000, "the manual transaction and the budget are in the archive, intact");
+  check(!(await fileExists(storagePath)) && (await fileExists(archivedFile)), "the statement file moved to archive/users/{uid}/imports/", archivedFile);
+
+  // Audit
   const auditAfter = await auditActions(alice.uid);
-  check(auditAfter[auditAfter.length - 1] === `import.purged(${expected})`, "audit log ends with import.purged", auditAfter.join(", "));
-  const purgedEntry = (await db.collection("auditLog").where("userId", "==", alice.uid).where("action", "==", "import.purged").get()).docs[0];
-  check(purgedEntry?.get("actor") === "system", 'the purge entry\'s actor is "system"', purgedEntry?.get("actor"));
-  const again = await runPurge({ ...purgeDeps, deleteFile: async () => {} });
-  check(again.transactions === 0 && again.imports === 0, "running the purge again finds nothing left", JSON.stringify(again));
+  check(auditAfter[auditAfter.length - 1] === `import.archived(${expected})`, "audit log ends with import.archived and the real count", auditAfter.join(", "));
+  const entry = (await db.collection("auditLog").where("userId", "==", alice.uid).where("action", "==", "import.archived").get()).docs[0];
+  check(entry?.get("actor") === "system", 'the archive entry\'s actor is "system"', entry?.get("actor"));
+
+  // Safe to run again
+  const again = await runArchive(deps);
+  check(again.imports === 0 && again.transactions === 0 && again.budgets === 0, "running the job again finds nothing left to move", JSON.stringify(again));
 
   console.log(`\n${failures === 0 ? "ALL CHECKS PASSED" : `${failures} CHECK(S) FAILED`}`);
   process.exitCode = failures === 0 ? 0 : 1;

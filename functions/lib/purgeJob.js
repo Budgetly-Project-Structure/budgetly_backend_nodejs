@@ -1,39 +1,50 @@
 /**
- * purgeJob.js (SCRUM-127)
+ * purgeJob.js (SCRUM-127, SCRUM-122; Sprint 5 #12: archive instead of delete)
  *
- * Permanently deletes things the user deleted more than 30 days ago.
+ * After 30 days, moves what users deleted out of the app and into the archive
+ * (budgetly_assets docs/data-framework.md, "After 30 days: the archive"). Nothing a
+ * user deleted is destroyed any more; it leaves the live data and goes where only
+ * admins can see it (firestore.rules / storage.rules deny every client, Sprint 5 #11).
  *
- * In the app, "delete" is a soft delete: a manual transaction or a budget gets
- * deletedAt, deletedBy and purgeAfter (30 days later) and is hidden, so it can be
- * restored from Recently deleted. The Firestore rules never let the app delete
- * for real, so this job (which runs on the server and bypasses the rules) is the
- * only thing that removes them for good.
+ * In the app, "delete" is a soft delete: deletedAt, deletedBy and purgeAfter (30 days
+ * later) are set and the item is hidden, so it can be restored from Recently deleted.
+ * Once purgeAfter has passed, this job (run daily by purgeDeleted in index.js, after
+ * the backup) moves it:
  *
- * Covers:
- *   transactions/{id}                 transactions the user deleted (manual ones, and
- *                                     the ones from a deleted statement)
- *   users/{uid}/budgets/{categoryId}  budgets the user removed
- *   users/{uid}/imports/{importId}    statements the user deleted (SCRUM-122): the
- *                                     import record, its transactions, the file in Storage,
- *                                     plus an "import.purged" audit entry with actor
- *                                     "system". Statements go first (Sprint 5 #2)
+ *   live                                archive
+ *   users/{uid}/imports/{importId}  ->  archive_imports/{uid}_{importId}
+ *   transactions/{id}               ->  archive_transactions/{id}
+ *   users/{uid}/budgets/{catId}     ->  archive_budgets/{uid}_{catId}
+ *   accounts/{accountId}            ->  archive_accounts/{uid}_{accountId}   (SCRUM-167)
+ *   Storage users/{uid}/imports/f   ->  Storage archive/users/{uid}/imports/f
  *
- * Safety checks, because this deletes data:
+ * Every archived document keeps all its fields, plus userId, originalPath and
+ * archivedAt (and archivedFilePath for imports). Writing the archive copy and deleting
+ * the live document happen in ONE batched write, so a document is never in both places
+ * and never in neither. Statements get an "import.archived" audit entry (actor "system")
+ * with the number of transactions archived with them; it replaces "import.purged".
+ *
+ * Safety:
  *   - only documents with both deletedAt and purgeAfter set, and purgeAfter in the past
- *   - each delete carries the time the document was last changed when we read it, so
- *     if the user restores it while the job runs, that delete is refused and skipped
+ *   - each live delete carries the time the document was last changed when we read it,
+ *     so something restored while the job runs is not moved (that move is skipped)
+ *   - batches stay at 400 writes or fewer (200 moves = 200 creates + 200 deletes)
+ *   - running it again after a partial failure is safe: whatever is still due is moved
+ *     the next time, and nothing is moved twice (see archiveImport for the order)
  *   - the job stops if a page makes no progress, and after a maximum number of pages
  */
 "use strict";
 
 const { fileNameFromPath } = require("./importFile");
 
-// Documents read (and deleted) per page
+// Documents read per page
 const DEFAULT_LIMIT = 400;
-// Firestore allows 500 writes per batch; stay under it
-const TXN_BATCH_SIZE = 400;
+// Moves per batch: each is 2 writes (archive copy + live delete), under Firestore's 500
+const MOVE_BATCH_SIZE = 200;
 // Pages per collection per run, so one run can't go on forever (400 x 50 = 20,000 documents)
 const DEFAULT_MAX_PAGES = 50;
+// Where archived statement files go
+const ARCHIVE_PREFIX = "archive/";
 
 /** Reads a Firestore Timestamp, a Date or a number of milliseconds as milliseconds. */
 function toMillis(value) {
@@ -50,130 +61,213 @@ function isDue(data, nowMs) {
   return deletedAt != null && purgeAfterMs != null && purgeAfterMs <= nowMs;
 }
 
-/**
- * Deletes the due documents that `makeQuery()` finds, one page at a time.
- * @returns {Promise<{deleted: number, skipped: number}>}
- */
-async function purgeQuery({ db, makeQuery, nowMs, limit, maxPages, logger, label }) {
-  let deleted = 0;
-  let skipped = 0;
+/** Loaded lazily so unit tests can run without firebase-admin installed. */
+function defaultServerTimestamp() {
+  const { FieldValue } = require("firebase-admin/firestore");
+  return FieldValue.serverTimestamp();
+}
 
+/** Where a statement file goes in the archive: users/a/imports/f.csv -> archive/users/a/imports/f.csv */
+function archiveFilePath(storagePath) {
+  return `${ARCHIVE_PREFIX}${storagePath}`;
+}
+
+/**
+ * Moves documents to the archive in batches: for each one, the archive copy and the
+ * live delete go in the same batch. If a batch is refused (usually because one of its
+ * documents was restored since we read it), its documents are moved one at a time, so
+ * only the changed one is skipped.
+ *
+ * @param {Object} db
+ * @param {{snap: Object, archiveRef: Object, data: Object, precondition?: boolean}[]} moves
+ * @returns {Promise<{moved: number, skipped: number}>}
+ */
+async function moveAll(db, moves) {
+  let moved = 0;
+  let skipped = 0;
+  const commit = async (list) => {
+    const batch = db.batch();
+    for (const m of list) {
+      batch.set(m.archiveRef, m.data);
+      if (m.precondition === false) batch.delete(m.snap.ref);
+      else batch.delete(m.snap.ref, { lastUpdateTime: m.snap.updateTime });
+    }
+    await batch.commit();
+  };
+  for (let i = 0; i < moves.length; i += MOVE_BATCH_SIZE) {
+    const chunk = moves.slice(i, i + MOVE_BATCH_SIZE);
+    try {
+      await commit(chunk);
+      moved += chunk.length;
+    } catch {
+      for (const m of chunk) {
+        try {
+          await commit([m]);
+          moved++;
+        } catch {
+          skipped++; // changed (restored) since we read it, or already gone
+        }
+      }
+    }
+  }
+  return { moved, skipped };
+}
+
+/** The archive copy: every original field, plus where it came from and when it moved. */
+function archivedData(snap, userId, archivedAt, extra = {}) {
+  return { ...snap.data(), userId, originalPath: snap.ref.path, archivedAt, ...extra };
+}
+
+/**
+ * Archives the due documents that `makeQuery()` finds, one page at a time.
+ * `target(snap)` returns { archiveRef, userId } for a document, or null to leave it.
+ * @returns {Promise<{archived: number, skipped: number}>}
+ */
+async function archiveQuery({ db, makeQuery, target, nowMs, limit, maxPages, serverTimestamp, logger, label }) {
+  let archived = 0;
+  let skipped = 0;
   for (let page = 0; page < maxPages; page++) {
     const snap = await makeQuery().limit(limit).get();
     if (snap.empty) break;
 
-    const writer = db.bulkWriter();
-    let refused = 0;
-    let queued = 0;
-    writer.onWriteError(() => {
-      refused++; // usually: the user restored it since we read it
-      return false; // don't retry
-    });
+    const moves = [];
     for (const d of snap.docs) {
-      // The query already asked for these, but never delete on the query alone
-      if (!isDue(d.data(), nowMs)) {
+      // The query already asked for these, but never move on the query alone
+      const t = isDue(d.data(), nowMs) ? target(d) : null;
+      if (!t) {
         skipped++;
         continue;
       }
-      queued++;
-      writer.delete(d.ref, { lastUpdateTime: d.updateTime }).catch(() => {}); // counted in onWriteError
+      moves.push({ snap: d, archiveRef: t.archiveRef, data: archivedData(d, t.userId, serverTimestamp()) });
     }
-    await writer.close();
+    const r = await moveAll(db, moves);
+    archived += r.moved;
+    skipped += r.skipped;
+    logger.info("Archived expired deletes", { collection: label, page: page + 1, archived: r.moved, skipped: r.skipped });
 
-    const removed = queued - refused;
-    deleted += removed;
-    skipped += refused;
-    logger.info("Purged expired deletes", { collection: label, page: page + 1, removed, refused });
-
-    // A short page means that was the last one. A page that removed nothing would
-    // come back identical on the next read, so stop instead of looping.
-    if (snap.size < limit || removed === 0) break;
+    // A short page means that was the last one. A page that moved nothing would come
+    // back identical on the next read, so stop instead of looping.
+    if (snap.size < limit || r.moved === 0) break;
   }
-  return { deleted, skipped };
+  return { archived, skipped };
 }
 
 /**
- * Removes statements whose 30 days are up (SCRUM-122). For each one, in this order:
- *   1. the import record, with the same "unchanged since we read it" check as above,
- *      so a statement restored while the job runs is left alone (and so is its file)
- *   2. its transactions, in batches of 400 or fewer. runPurge does statements before
- *      the transaction sweep, so they are all still here and get counted
- *   3. the file in Storage (already gone is fine)
- *   4. an "import.purged" audit entry with actor "system", whose transactionCount is
- *      how many transactions step 2 removed (the import record no longer stores a
- *      count, Sprint 5 #2)
- * A file outside the owner's own folder is never deleted.
- * @returns {Promise<{deleted: number, skipped: number}>}
+ * Archives one expired statement. The order makes a re-run after a failure part way
+ * safe and complete:
+ *   1. copy the file to archive/users/{uid}/imports/... (a copy left from an earlier
+ *      attempt is simply written again; a file already gone is fine)
+ *   2. move its transactions to archive_transactions, 200 at a time
+ *   3. delete the original file
+ *   4. move the import record to archive_imports (with archivedFilePath), conditioned on
+ *      it being unchanged since we read it; if it changed, the record is left for the
+ *      next run (a user can't restore a statement once purgeAfter has passed, so this
+ *      only guards against two runs at once)
+ *   5. write the "import.archived" audit entry, with the number of its transactions now
+ *      in the archive
+ * If the job stops after step 2 or 3, the record is still live and due, so the next run
+ * repeats the steps: the file is found in the archive (step 1), and the transaction
+ * count is read from the archive, so it's still right.
+ * A file outside the owner's own folder is never touched.
+ *
+ * @returns {Promise<"archived"|"skipped">}
  */
-async function purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, writeAudit, logger }) {
-  let deleted = 0;
-  let skipped = 0;
+async function archiveImport({ db, snap, uid, files, writeAudit, serverTimestamp, logger }) {
+  const importId = snap.id;
+  const imp = snap.data();
+  const ownFile = typeof imp.storagePath === "string" && imp.storagePath.startsWith(`users/${uid}/imports/`);
+  const archivedFilePath = ownFile ? archiveFilePath(imp.storagePath) : null;
 
+  // 1. Copy the file
+  let fileArchived = false;
+  if (ownFile) {
+    if (await files.exists(imp.storagePath)) {
+      await files.copy(imp.storagePath, archivedFilePath);
+      fileArchived = true;
+    } else {
+      fileArchived = await files.exists(archivedFilePath); // copied by an earlier run
+    }
+  }
+
+  // 2. Its transactions (they can't be restored without the statement, so no precondition)
+  const txnQuery = () =>
+    db.collection("transactions").where("userId", "==", uid).where("sourceStatementId", "==", importId).limit(DEFAULT_LIMIT);
+  for (;;) {
+    const txns = await txnQuery().get();
+    if (txns.empty) break;
+    const r = await moveAll(
+      db,
+      txns.docs.map((t) => ({
+        snap: t,
+        archiveRef: db.collection("archive_transactions").doc(t.id),
+        data: archivedData(t, uid, serverTimestamp()),
+        precondition: false,
+      }))
+    );
+    if (r.moved === 0) break; // nothing could be moved; don't loop
+  }
+  const transactionCount = (
+    await db.collection("archive_transactions").where("userId", "==", uid).where("sourceStatementId", "==", importId).get()
+  ).size;
+
+  // 3. Remove the original file
+  if (ownFile && fileArchived) await files.remove(imp.storagePath);
+
+  // 4. The import record, only if nobody changed it since we read it
+  const r = await moveAll(db, [{
+    snap,
+    archiveRef: db.collection("archive_imports").doc(`${uid}_${importId}`),
+    data: archivedData(snap, uid, serverTimestamp(), { archivedFilePath: fileArchived ? archivedFilePath : null }),
+  }]);
+  if (r.moved === 0) {
+    logger.warn("Statement changed while archiving, skipped", { uid, importId });
+    return "skipped";
+  }
+
+  // 5. Audit
+  await writeAudit({
+    userId: uid,
+    action: "import.archived",
+    targetPath: `users/${uid}/imports/${importId}`,
+    actor: "system",
+    details: { fileName: fileNameFromPath(imp.storagePath), transactionCount, archivedFilePath: fileArchived ? archivedFilePath : null },
+  });
+  logger.info("Archived statement", { uid, importId, transactionCount });
+  return "archived";
+}
+
+/**
+ * Archives every statement whose 30 days are up.
+ * @returns {Promise<{archived: number, skipped: number}>}
+ */
+async function archiveImports({ db, now, nowMs, limit, maxPages, files, writeAudit, serverTimestamp, logger }) {
+  let archived = 0;
+  let skipped = 0;
   for (let page = 0; page < maxPages; page++) {
     const snap = await db.collectionGroup("imports").where("purgeAfter", "<=", now).limit(limit).get();
     if (snap.empty) break;
 
-    let removed = 0;
+    let moved = 0;
     for (const d of snap.docs) {
-      const imp = d.data();
-      if (!isDue(imp, nowMs)) {
+      const uid = d.ref.parent?.parent?.id; // users/{uid}/imports/{importId}
+      if (!uid || !isDue(d.data(), nowMs)) {
         skipped++;
         continue;
       }
-      const uid = d.ref.parent.parent.id; // users/{uid}/imports/{importId}
-      const importId = d.id;
-
-      // 1. The import record, only if nobody restored it since we read it
       try {
-        await d.ref.delete({ lastUpdateTime: d.updateTime });
+        const outcome = await archiveImport({ db, snap: d, uid, files, writeAudit, serverTimestamp, logger });
+        if (outcome === "archived") moved++;
+        else skipped++;
       } catch (err) {
+        // Left as it is: still due, so the next run tries again
         skipped++;
-        logger.warn("Statement changed while purging, skipped", { uid, importId, message: err.message });
-        continue;
+        logger.error("Could not archive statement; will try again tomorrow", { uid, importId: d.id, message: err.message });
       }
-
-      // 2. Its transactions, counted for the audit entry
-      let removedTransactions = 0;
-      for (;;) {
-        const txns = await db.collection("transactions")
-          .where("userId", "==", uid)
-          .where("sourceStatementId", "==", importId)
-          .limit(TXN_BATCH_SIZE)
-          .get();
-        if (txns.empty) break;
-        const batch = db.batch();
-        txns.docs.forEach((t) => batch.delete(t.ref));
-        await batch.commit();
-        removedTransactions += txns.size;
-      }
-
-      // 3. The file, only from the owner's own folder
-      if (imp.storagePath && imp.storagePath.startsWith(`users/${uid}/imports/`)) {
-        try {
-          await deleteFile(imp.storagePath);
-        } catch (err) {
-          if (!(err?.code === 404 || err?.code === "storage/object-not-found")) {
-            logger.error("Could not delete purged statement file", { uid, importId, storagePath: imp.storagePath, message: err.message });
-          }
-        }
-      }
-
-      // 4. The audit entry
-      await writeAudit({
-        userId: uid,
-        action: "import.purged",
-        targetPath: `users/${uid}/imports/${importId}`,
-        actor: "system",
-        details: { fileName: fileNameFromPath(imp.storagePath), transactionCount: removedTransactions },
-      });
-      removed++;
-      logger.info("Purged statement", { uid, importId, removedTransactions });
     }
-    deleted += removed;
-    // Same stop rules as purgeQuery
-    if (snap.size < limit || removed === 0) break;
+    archived += moved;
+    if (snap.size < limit || moved === 0) break;
   }
-  return { deleted, skipped };
+  return { archived, skipped };
 }
 
 /**
@@ -182,51 +276,85 @@ async function purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, write
  * @param {Date}   [opts.now]         Treated as the current time (override in tests)
  * @param {number} [opts.limit]
  * @param {number} [opts.maxPages]
- * @param {(path: string) => Promise<void>} [opts.deleteFile]  Deletes a Storage file. Without
- *        it (and writeAudit), statements are left alone.
+ * @param {{exists: (p: string) => Promise<boolean>, copy: (from: string, to: string) => Promise<void>,
+ *          remove: (p: string) => Promise<void>}} [opts.files]
+ *        Storage operations. Without them (and writeAudit), statements are left alone.
  * @param {(entry: Object) => Promise<void>} [opts.writeAudit]  auditLog.js createAuditWriter()
+ * @param {() => any} [opts.serverTimestamp]  Override in tests
  * @param {Object} [opts.logger]
- * @returns {Promise<{transactions: number, budgets: number, imports: number, skipped: number}>}
+ * @returns {Promise<{imports: number, transactions: number, budgets: number, accounts: number, skipped: number}>}
+ *          how many of each were archived
  */
-async function runPurge({ db, now = new Date(), limit = DEFAULT_LIMIT, maxPages = DEFAULT_MAX_PAGES, deleteFile, writeAudit, logger = console }) {
+async function runArchive({
+  db,
+  now = new Date(),
+  limit = DEFAULT_LIMIT,
+  maxPages = DEFAULT_MAX_PAGES,
+  files,
+  writeAudit,
+  serverTimestamp = defaultServerTimestamp,
+  logger = console,
+}) {
   const nowMs = now.getTime();
+  const common = { db, nowMs, limit, maxPages, serverTimestamp, logger };
 
-  // Statements first, so purgeImports removes (and counts) their transactions itself.
-  // The transaction sweep below then only finds manual ones, plus any a statement left behind.
-  const imports = deleteFile && writeAudit
-    ? await purgeImports({ db, now, nowMs, limit, maxPages, deleteFile, writeAudit, logger })
-    : { deleted: 0, skipped: 0 };
+  // Statements first, so they take their transactions with them. The sweep below then
+  // only finds manual transactions, plus any a statement left behind.
+  const imports = files && writeAudit
+    ? await archiveImports({ ...common, now, files, writeAudit })
+    : { archived: 0, skipped: 0 };
 
   // purgeAfter <= now only matches documents that have a purgeAfter, so active ones
   // (purgeAfter null) are never returned
-  const txns = await purgeQuery({
-    db,
-    makeQuery: () => db.collection("transactions").where("purgeAfter", "<=", now),
-    nowMs,
-    limit,
-    maxPages,
-    logger,
+  const txns = await archiveQuery({
+    ...common,
     label: "transactions",
+    makeQuery: () => db.collection("transactions").where("purgeAfter", "<=", now),
+    target: (d) => {
+      const userId = d.data().userId;
+      return userId ? { userId, archiveRef: db.collection("archive_transactions").doc(d.id) } : null;
+    },
   });
   // Budgets live under every user, so this reads across all users' budgets collections
-  const budgets = await purgeQuery({
-    db,
-    makeQuery: () => db.collectionGroup("budgets").where("purgeAfter", "<=", now),
-    nowMs,
-    limit,
-    maxPages,
-    logger,
+  const budgets = await archiveQuery({
+    ...common,
     label: "budgets",
+    makeQuery: () => db.collectionGroup("budgets").where("purgeAfter", "<=", now),
+    target: (d) => {
+      const userId = d.ref.parent?.parent?.id; // users/{uid}/budgets/{categoryId}
+      return userId ? { userId, archiveRef: db.collection("archive_budgets").doc(`${userId}_${d.id}`) } : null;
+    },
+  });
+  // Accounts (SCRUM-167) are top level, with the owner in userId
+  const accounts = await archiveQuery({
+    ...common,
+    label: "accounts",
+    makeQuery: () => db.collection("accounts").where("purgeAfter", "<=", now),
+    target: (d) => {
+      const userId = d.data().userId;
+      return userId ? { userId, archiveRef: db.collection("archive_accounts").doc(`${userId}_${d.id}`) } : null;
+    },
   });
 
   const result = {
-    transactions: txns.deleted,
-    budgets: budgets.deleted,
-    imports: imports.deleted,
-    skipped: txns.skipped + budgets.skipped + imports.skipped,
+    imports: imports.archived,
+    transactions: txns.archived,
+    budgets: budgets.archived,
+    accounts: accounts.archived,
+    skipped: imports.skipped + txns.skipped + budgets.skipped + accounts.skipped,
   };
-  logger.info("Purge finished", result);
+  logger.info("Archive finished", result);
   return result;
 }
 
-module.exports = { runPurge, purgeImports, isDue, DEFAULT_LIMIT, DEFAULT_MAX_PAGES };
+module.exports = {
+  runArchive,
+  // The old name, kept so existing callers keep working
+  runPurge: runArchive,
+  archiveImports,
+  archiveFilePath,
+  isDue,
+  DEFAULT_LIMIT,
+  DEFAULT_MAX_PAGES,
+  MOVE_BATCH_SIZE,
+};

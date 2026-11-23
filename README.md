@@ -55,7 +55,7 @@ firebase deploy --only functions
 
 ## Backups (Sprint 5 #15)
 
-Every day at 3 AM Central the `purgeDeleted` scheduled function first starts a **Firestore export** of the whole default database to the default Storage bucket, in `backups/YYYY-MM-DD/`, and deletes backups older than 7 days (`functions/lib/backupJob.js`). If the export can't be started, that day's cleanup is skipped, so nothing is removed without a fresh backup. The full plan, and how backups differ from the archive, is in budgetly_assets `docs/data-framework.md`.
+Every day at 3 AM Central the `purgeDeleted` scheduled function first starts a **Firestore export** of the whole default database to the default Storage bucket, in `backups/YYYY-MM-DD/`, and deletes backups older than 7 days (`functions/lib/backupJob.js`). If the export can't be started, that day's archiving is skipped, so nothing leaves the live data without a fresh backup. After the backup, the same job moves what users deleted more than 30 days ago into the admin-only archive (`archive_*` collections and `archive/` in Storage, `functions/lib/purgeJob.js`, Sprint 5 #12); nothing is deleted for good. The full plan, and how backups differ from the archive, is in budgetly_assets `docs/data-framework.md`.
 
 It costs nothing: no second database, no paid managed backups or point-in-time recovery, and no new Cloud Scheduler job. An export is billed as one read per document, far under the free 50,000 reads a day at our size, and a week of exports is a few MB in the bucket. Check the billing report after the first week to confirm. Users can never reach `backups/` (`storage.rules`).
 
