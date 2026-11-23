@@ -21,15 +21,18 @@ service cloud.firestore {
 
     // The shape of a manual transaction (SCRUM-86): owned by this user, marked source
     // 'manual', with a real date, a merchant of 1-100 characters, and a non-zero
-    // amount (negative = spending, positive = income). The list of allowed fields is
-    // checked where it's used (the transactions block at the bottom).
+    // amountCents (whole cents; negative = spending, positive = income). The old dollar
+    // `amount` is still accepted until the migration (SCRUM-151) and strict rules (SCRUM-152).
+    // The list of allowed fields is checked where it's used (the transactions block at the bottom).
     function isManualTxnShape(uid, d) {
-      return d.keys().hasAll(['userId','date','merchant','amount','category','source'])
+      return d.keys().hasAll(['userId','date','merchant','category','source'])
+        && ('amountCents' in d || 'amount' in d)
+        && (!('amountCents' in d) || (d.amountCents is int && d.amountCents != 0))
+        && (!('amount' in d) || (d.amount is number && d.amount != 0))
         && d.userId == uid
         && d.source == 'manual'
         && d.date is timestamp
         && d.merchant is string && d.merchant.size() > 0 && d.merchant.size() <= 100
-        && d.amount is number && d.amount != 0
         && d.category is string
         && d.categorySource == 'user';
     }
@@ -107,12 +110,18 @@ service cloud.firestore {
         // Setting a limit. A soft-deleted budget must be restored first, so saving
         // a limit can't quietly undo a delete.
         // source (SCRUM-137) says who chose the limit: "auto" (Auto budget) or "user"
+        // The limit is whole cents, limitCents (SCRUM-148): 25000 is $250. The old dollar
+        // `limit` is still accepted, only until the web app has moved over and the existing
+        // budgets are converted (SCRUM-151); SCRUM-152 then requires limitCents.
         allow create, update: if isOwner(uid)
           && (resource == null || isActive())
-          && request.resource.data.keys().hasOnly(['categoryId','limit','source','updatedAt'])
+          && request.resource.data.keys().hasOnly(['categoryId','limit','limitCents','source','updatedAt'])
           && request.resource.data.categoryId == categoryId
-          && request.resource.data.limit is number
-          && request.resource.data.limit >= 0
+          && ('limitCents' in request.resource.data || 'limit' in request.resource.data)
+          && (!('limitCents' in request.resource.data)
+              || (request.resource.data.limitCents is int && request.resource.data.limitCents >= 0))
+          && (!('limit' in request.resource.data)
+              || (request.resource.data.limit is number && request.resource.data.limit >= 0))
           && (!('source' in request.resource.data) || request.resource.data.source in ['auto', 'user']);
         // Removing a budget is a soft delete (or a restore), never a real delete
         allow update: if isOwner(uid) && (isSoftDelete() || isRestore());
@@ -164,7 +173,7 @@ service cloud.firestore {
       // (Admin SDK bypasses rules). userId must be the caller's own uid, and new
       // docs start out not deleted (deletedAt == null).
       allow create: if request.auth != null
-        && request.resource.data.keys().hasOnly(['userId','date','merchant','amount','category','categorySource',
+        && request.resource.data.keys().hasOnly(['userId','date','merchant','amount','amountCents','category','categorySource',
                                                   'categoryConfidence','isUserCorrected','accountId',
                                                   'sourceStatementId','source','createdAt','updatedAt',
                                                   'deletedAt','deletedBy','purgeAfter'])
@@ -184,7 +193,7 @@ service cloud.firestore {
       allow update: if isTxnOwner()
         && resource.data.get('source', '') == 'manual'
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['date','merchant','amount','category','accountId','updatedAt'])
+             .hasOnly(['date','merchant','amount','amountCents','category','accountId','updatedAt'])
         && isManualTxnShape(request.auth.uid, request.resource.data);
       // Soft delete or restore, manual transactions only. Imported ones are
       // deleted together with their statement, by the server.
