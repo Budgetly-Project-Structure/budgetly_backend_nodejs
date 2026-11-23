@@ -84,69 +84,43 @@ describe('Firestore security rules: budgets', () => {
   const budget = (db, user = 'alice', cat = 'dining') => doc(db, `users/${user}/budgets/${cat}`);
 
   it('owner can create a budget', () =>
-    assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 })));
+    assertSucceeds(setDoc(budget(alice()), { limitCents: 25000 })));
 
   it('owner can read and change their budget, but not hard delete it', async () => {
-    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 }));
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 25000 }));
     await assertSucceeds(getDoc(budget(alice())));
-    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 300 }));
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 30000 }));
     await assertFails(deleteDoc(budget(alice()))); // soft delete only (see below)
   });
 
   it('other user cannot read or write it', async () => {
-    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250 }));
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 25000 }));
     await assertFails(getDoc(budget(bob())));
-    await assertFails(setDoc(budget(bob(), 'alice'), { categoryId: 'dining', limit: 1 }));
+    await assertFails(setDoc(budget(bob(), 'alice'), { limitCents: 100 }));
   });
 
   it('unauthenticated user cannot write one', () =>
-    assertFails(setDoc(budget(env.unauthenticatedContext().firestore()), { categoryId: 'dining', limit: 1 })));
+    assertFails(setDoc(budget(env.unauthenticatedContext().firestore()), { limitCents: 100 })));
 
-  it('limit must be a non-negative number', async () => {
-    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: -5 }));
-    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: '250' }));
+  // Strict (SCRUM-152): the limit is whole cents, 0 or more
+  it('limitCents is required, a whole number, not negative, and not text', async () => {
+    await assertFails(setDoc(budget(alice()), { source: 'user' }));
+    await assertFails(setDoc(budget(alice()), {}));
+    await assertFails(setDoc(budget(alice()), { limitCents: 250.5 }));
+    await assertFails(setDoc(budget(alice()), { limitCents: -100 }));
+    await assertFails(setDoc(budget(alice()), { limitCents: '25000' }));
   });
 
-  it('categoryId must match the document id and no extra fields are allowed', async () => {
-    await assertFails(setDoc(budget(alice()), { categoryId: 'groceries', limit: 250 }));
-    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, note: 'x' }));
+  it('a limit of 0 is allowed, and source can be set', async () => {
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 0 }));
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 25050, source: 'user' }));
   });
 
-  // The document id is the category (SCRUM-146): categoryId is no longer saved
-  it('a budget without categoryId is fine; a wrong categoryId is still refused', async () => {
-    await assertSucceeds(setDoc(budget(alice()), { limitCents: 25000, source: 'user' }));
-    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 25000 }));
-    await assertFails(setDoc(budget(alice()), { categoryId: 'groceries', limitCents: 25000 }));
-  });
-
-  // Limits in whole cents (SCRUM-148): the old dollar `limit` still works until #151/#152
-  describe('limit in cents (SCRUM-148)', () => {
-    it('owner can save a limit as whole cents', async () => {
-      await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 25000 }));
-      await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 25050, source: 'user' }));
-    });
-
-    it('a limit of 0 cents is allowed', () =>
-      assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 0 })));
-
-    it('limitCents must be a whole number, not negative, and not text', async () => {
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limitCents: 250.5 }));
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limitCents: -100 }));
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limitCents: '25000' }));
-    });
-
-    it('a budget needs a limit: limitCents or the old limit', async () => {
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining' }));
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', source: 'user' }));
-    });
-
-    it('the old dollar limit is still accepted for now, but it must still be valid', async () => {
-      await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250.5 }));
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: -1, limitCents: 25000 }));
-    });
-
-    it("another user can't save a limit in cents on someone else's budget", () =>
-      assertFails(setDoc(budget(bob(), 'alice'), { categoryId: 'dining', limitCents: 25000 })));
+  it('the old dollar limit and categoryId (the doc id) can no longer be saved', async () => {
+    await assertFails(setDoc(budget(alice()), { limit: 250 }));
+    await assertFails(setDoc(budget(alice()), { limitCents: 25000, limit: 250 }));
+    await assertFails(setDoc(budget(alice()), { limitCents: 25000, categoryId: 'dining' }));
+    await assertFails(setDoc(budget(alice()), { limitCents: 25000, note: 'x' }));
   });
 });
 
@@ -209,7 +183,7 @@ describe('Firestore security rules: manual transactions', () => {
     userId: 'alice',
     date: Timestamp.fromDate(new Date('2026-10-15T12:00:00Z')),
     merchant: 'Farmers market',
-    amount: -23.5,
+    amountCents: -2350,
     category: 'groceries',
     categorySource: 'user',
     categoryConfidence: 1,
@@ -239,8 +213,8 @@ describe('Firestore security rules: manual transactions', () => {
   });
 
   it('rejects a bad amount, merchant, date or extra field', async () => {
-    await assertFails(setDoc(txn(alice()), manual({ amount: 0 })));
-    await assertFails(setDoc(txn(alice()), manual({ amount: '10' })));
+    await assertFails(setDoc(txn(alice()), manual({ amountCents: 0 })));
+    await assertFails(setDoc(txn(alice()), manual({ amountCents: '10' })));
     await assertFails(setDoc(txn(alice()), manual({ merchant: '' })));
     await assertFails(setDoc(txn(alice()), manual({ merchant: 'x'.repeat(101) })));
     await assertFails(setDoc(txn(alice()), manual({ date: '2026-10-15' })));
@@ -250,8 +224,7 @@ describe('Firestore security rules: manual transactions', () => {
   describe('amount in cents (SCRUM-150)', () => {
     // A manual transaction as the web app now writes it: amountCents, no dollar amount
     const cents = (extra = {}) => {
-      const { amount, ...rest } = manual();
-      return { ...rest, amountCents: -2350, ...extra };
+      return { ...manual(), amountCents: -2350, ...extra };
     };
 
     it('accepts whole cents, spending or income', async () => {
@@ -270,14 +243,27 @@ describe('Firestore security rules: manual transactions', () => {
       await assertFails(setDoc(txn(alice()), none));
     });
 
-    it('still accepts the old dollar amount, but not an invalid one', async () => {
-      await assertSucceeds(setDoc(txn(alice(), 'old'), manual()));
-      await assertFails(setDoc(txn(alice()), manual({ amount: 0 })));
+    // Strict (SCRUM-152): a new transaction can't carry the old dollar amount
+    it('no longer accepts the old dollar amount, alone or with cents', async () => {
+      const { amountCents, ...old } = manual({ amount: -23.5 });
+      await assertFails(setDoc(txn(alice(), 'old'), old));
+      await assertFails(setDoc(txn(alice(), 'both'), manual({ amount: -23.5 })));
     });
 
+    // A converted transaction (SCRUM-151) still has its old `amount` until it is edited
+    const seedLegacy = () =>
+      env.withSecurityRulesDisabled((ctx) => setDoc(txn(ctx.firestore()), manual({ amount: -23.5 })));
+
     it('owner can edit to cents and drop the old dollar field', async () => {
-      await seed(); // seeded with the old `amount`
+      await seedLegacy();
       await assertSucceeds(updateDoc(txn(alice()), { amountCents: -3000, amount: deleteField(), merchant: 'Aldi' }));
+    });
+
+    it('an edit can keep the old dollar amount as it is, but not change it', async () => {
+      await seedLegacy();
+      await assertSucceeds(updateDoc(txn(alice()), { merchant: 'Aldi' }));
+      await assertFails(updateDoc(txn(alice()), { amount: -99 }));
+      await assertFails(updateDoc(txn(alice()), { amountCents: -3000, amount: -30 }));
     });
 
     it('editing to a bad cents value is rejected', async () => {
@@ -289,7 +275,7 @@ describe('Firestore security rules: manual transactions', () => {
 
   it('owner can edit a manual transaction', async () => {
     await seed();
-    await assertSucceeds(updateDoc(txn(alice()), { merchant: 'Aldi', amount: -30, category: 'groceries' }));
+    await assertSucceeds(updateDoc(txn(alice()), { merchant: 'Aldi', amountCents: -3000, category: 'groceries' }));
   });
 
   it('other user cannot edit or delete it', async () => {
@@ -334,7 +320,7 @@ describe('Firestore security rules: soft delete', () => {
     userId: 'alice',
     date: Timestamp.fromDate(new Date('2026-10-15T12:00:00Z')),
     merchant: 'Farmers market',
-    amount: -23.5,
+    amountCents: -2350,
     category: 'groceries',
     categorySource: 'user',
     source: 'manual',
@@ -395,38 +381,38 @@ describe('Firestore security rules: soft delete', () => {
 
   describe('budgets', () => {
     it('hard delete is denied', async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await seed('users/alice/budgets/dining', { limitCents: 25000 });
       await assertFails(deleteDoc(budget(alice())));
     });
 
     it('owner can soft delete', async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await seed('users/alice/budgets/dining', { limitCents: 25000 });
       await assertSucceeds(updateDoc(budget(alice()), softDelete()));
     });
 
     it('deletedBy set to someone else is denied', async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await seed('users/alice/budgets/dining', { limitCents: 25000 });
       await assertFails(updateDoc(budget(alice()), softDelete('bob')));
     });
 
     it("cannot soft delete another user's budget", async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
+      await seed('users/alice/budgets/dining', { limitCents: 25000 });
       await assertFails(updateDoc(doc(bob(), 'users/alice/budgets/dining'), softDelete('bob')));
     });
 
     it('changing other fields in the same write is denied', async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250 });
-      await assertFails(updateDoc(budget(alice()), { ...softDelete(), limit: 0 }));
+      await seed('users/alice/budgets/dining', { limitCents: 25000 });
+      await assertFails(updateDoc(budget(alice()), { ...softDelete(), limitCents: 0 }));
     });
 
     it('owner can restore a deleted one', async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250, ...deletedFields() });
+      await seed('users/alice/budgets/dining', { limitCents: 25000, ...deletedFields() });
       await assertSucceeds(updateDoc(budget(alice()), restore));
     });
 
     it('saving a limit cannot undo a delete; restore first', async () => {
-      await seed('users/alice/budgets/dining', { categoryId: 'dining', limit: 250, ...deletedFields() });
-      await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 300 }));
+      await seed('users/alice/budgets/dining', { limitCents: 25000, ...deletedFields() });
+      await assertFails(setDoc(budget(alice()), { limitCents: 30000 }));
     });
   });
 });
@@ -444,7 +430,7 @@ describe('Firestore security rules: ownership and impersonation (SCRUM-114)', ()
     userId: 'alice',
     date: Timestamp.fromDate(new Date('2026-10-15T12:00:00Z')),
     merchant: 'Farmers market',
-    amount: -23.5,
+    amountCents: -2350,
     category: 'groceries',
     categorySource: 'user',
     categoryConfidence: 1,
@@ -716,9 +702,9 @@ describe('Firestore security rules: monthly budget (SCRUM-137)', () => {
   const record = (extra = {}) => ({ month: '2026-11', auto: true, savings: 200, createdAt: serverTimestamp(), ...extra });
 
   it('a budget can say source "auto" or "user", nothing else', async () => {
-    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 250, source: 'auto' }));
-    await assertSucceeds(setDoc(budget(alice()), { categoryId: 'dining', limit: 300, source: 'user' }));
-    await assertFails(setDoc(budget(alice()), { categoryId: 'dining', limit: 300, source: 'robot' }));
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 25000, source: 'auto' }));
+    await assertSucceeds(setDoc(budget(alice()), { limitCents: 30000, source: 'user' }));
+    await assertFails(setDoc(budget(alice()), { limitCents: 30000, source: 'robot' }));
   });
 
   it('owner can record the month once, and read it', async () => {
